@@ -25,15 +25,22 @@ impl std::fmt::Debug for WebhookGuard {
 impl WebhookGuard {
     /// Derives the expected path from `secret`:
     /// `/<sha256(secret) hex>`.
-    #[must_use]
-    pub fn new(secret: impl Into<String>) -> Self {
+    ///
+    /// # Errors
+    ///
+    /// Rejects an empty secret: an empty configured token would accept an
+    /// empty header.
+    pub fn new(secret: impl Into<String>) -> crate::error::Result<Self> {
         let secret = secret.into();
+        if secret.is_empty() {
+            return Err(crate::error::Error::EmptySecret);
+        }
         let digest = Sha256::digest(secret.as_bytes());
         let derived_path = format!("/{}", hex::encode(digest));
-        Self {
+        Ok(Self {
             secret,
             derived_path,
-        }
+        })
     }
 
     /// The path that must appear in `setWebhook`.

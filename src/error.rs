@@ -5,6 +5,9 @@ use thiserror::Error;
 /// Failures from verification, parsing or the Bot API.
 #[derive(Debug, Error)]
 pub enum Error {
+    /// The configured secret/token is empty.
+    #[error("secret must not be empty")]
+    EmptySecret,
     /// Secret token header does not match.
     #[error("secret token mismatch")]
     SecretMismatch,

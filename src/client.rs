@@ -64,7 +64,7 @@ impl<T: Transport> TelegramClient<T> {
     }
 }
 
-impl<T: Transport + std::fmt::Debug> std::fmt::Debug for TelegramClient<T> {
+impl<T: Transport> std::fmt::Debug for TelegramClient<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         // Never print the bot token.
         f.debug_struct("TelegramClient")

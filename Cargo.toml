@@ -10,6 +10,7 @@ documentation = "https://docs.rs/telegram-api-client"
 keywords = ["telegram", "bot", "api", "webhook"]
 categories = ["api-bindings", "web-programming"]
 readme = "README.md"
+exclude = [".github/**", "deny.toml"]
 
 [features]
 default = ["http"]

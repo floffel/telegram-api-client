@@ -62,3 +62,10 @@ fn base_url_is_configurable() {
     let client = TelegramClient::new("t", rec).with_base_url(host.clone());
     assert_eq!(client.method_url("getMe"), format!("{host}/bott/getMe"));
 }
+
+#[test]
+fn debug_does_not_leak_the_token() {
+    let client = TelegramClient::new("123:SECRET", recorder(json!({})));
+    let rendered = format!("{client:?}");
+    assert!(!rendered.contains("SECRET"), "token im Debug: {rendered}");
+}
