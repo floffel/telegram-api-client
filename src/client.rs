@@ -6,7 +6,6 @@ use crate::error::Result;
 use crate::transport::Transport;
 
 /// Client bound to one bot token.
-#[derive(Debug)]
 pub struct TelegramClient<T: Transport> {
     token: String,
     base_url: String,
@@ -62,5 +61,14 @@ impl<T: Transport> TelegramClient<T> {
         self.transport
             .post_json(&self.method_url("getMe"), &json!({}))
             .await
+    }
+}
+
+impl<T: Transport + std::fmt::Debug> std::fmt::Debug for TelegramClient<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Never print the bot token.
+        f.debug_struct("TelegramClient")
+            .field("base_url", &self.base_url)
+            .finish_non_exhaustive()
     }
 }

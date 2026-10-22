@@ -12,12 +12,16 @@ struct Recorder {
 }
 
 impl Transport for Recorder {
-    async fn post_json(&self, url: &str, body: &Value) -> Result<Value> {
+    fn post_json(
+        &self,
+        url: &str,
+        body: &Value,
+    ) -> impl std::future::Future<Output = Result<Value>> {
         self.calls
             .lock()
             .unwrap()
             .push((url.to_string(), body.clone()));
-        Ok(self.reply.clone())
+        std::future::ready(Ok(self.reply.clone()))
     }
 }
 
