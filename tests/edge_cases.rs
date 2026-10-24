@@ -725,7 +725,7 @@ fn update_cursor_never_reprocesses_an_id() {
     assert_eq!(cursor.next_offset(), Some(6));
 
     // Older ids are dropped entirely.
-    assert!(cursor.confirm(&batch(&[1, 2])).is_empty());
+    assert_eq!(cursor.confirm(&batch(&[1, 2])), Vec::new());
     assert_eq!(cursor.next_offset(), Some(6));
 }
 
@@ -736,6 +736,6 @@ fn update_cursor_saturates_at_i64_max() {
         update_id: i64::MAX,
         ..Update::default()
     };
-    assert!(cursor.confirm(&[update]).is_empty());
+    assert_eq!(cursor.confirm(&[update]), Vec::new());
     assert_eq!(cursor.next_offset(), Some(i64::MAX));
 }
