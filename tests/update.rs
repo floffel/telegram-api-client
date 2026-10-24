@@ -21,7 +21,8 @@ fn parses_group_message_with_sender() {
         message.chat,
         Chat {
             id: -1001,
-            chat_type: "supergroup".into()
+            chat_type: "supergroup".into(),
+            ..Chat::default()
         }
     );
     assert_eq!(
