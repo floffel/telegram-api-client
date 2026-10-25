@@ -257,7 +257,7 @@ CI runs `cargo fmt --check`, `cargo clippy --all-targets --all-features --
 -D warnings`, `cargo test` with and without default features, `cargo doc` with
 `-D warnings`, `cargo deny check`, and a coverage job
 (`cargo llvm-cov --all-features --fail-under-lines 95`). Local numbers for
-0.1.1: **97.6 % line, 96.9 % region, 99.0 % function coverage**. The lines that
+0.1.2: **97.6 % line, 96.9 % region, 99.0 % function coverage**. The lines that
 remain uncovered are JSON-shape guards and OS-level branches (a thread that
 cannot be spawned, a socket that vanishes mid-flight) that cannot be forced
 deterministically.
