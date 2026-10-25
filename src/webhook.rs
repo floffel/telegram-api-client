@@ -8,8 +8,18 @@ use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 
 use crate::error::{Error, Result};
+use crate::webhook_api::validate_secret;
 
 /// Verifies secret token and derived path for incoming webhook calls.
+///
+/// Both checks are constant time, and the configured secret is kept only as a
+/// SHA-256 digest, so [`Debug`](std::fmt::Debug) has nothing to redact and the
+/// comparison cannot leak the secret's length: a 3-character and a 200-character
+/// token are both 32 bytes on the wire and in memory.
+///
+/// The secret must be one Telegram accepts (`1..=256` characters of
+/// `A-Z a-z 0-9 _ -`), because a secret Telegram rejects can never arrive in the
+/// header — a guard built from one could not verify anything.
 ///
 /// ```
 /// use telegram_api_client::WebhookGuard;
@@ -19,10 +29,17 @@ use crate::error::{Error, Result};
 /// // before trusting an incoming request.
 /// assert!(guard.verify_secret(Some("s3cret")).is_ok());
 /// assert!(guard.verify_path(guard.derived_path()).is_ok());
+///
+/// // Values Telegram would never let you register are refused here, not
+/// // silently accepted and then never matched.
+/// assert!(WebhookGuard::new("has space").is_err());
+/// assert!(WebhookGuard::new("ümlaut").is_err());
+/// assert!(WebhookGuard::new("a".repeat(257)).is_err());
 /// ```
 #[derive(Clone)]
 pub struct WebhookGuard {
-    secret: String,
+    /// `sha256(secret)` — the only form the secret takes inside the guard.
+    secret_digest: [u8; 32],
     derived_path: String,
 }
 
@@ -38,8 +55,12 @@ impl WebhookGuard {
     ///
     /// # Errors
     ///
-    /// Rejects an empty secret: an empty configured token would accept an
-    /// empty header.
+    /// Rejects an empty secret with [`Error::EmptySecret`] — an empty
+    /// configured token would accept an empty header — and otherwise applies
+    /// Telegram's own secret rules through the same validator `setWebhook`
+    /// uses: at most
+    /// [`MAX_SECRET_TOKEN`](crate::webhook_api::MAX_SECRET_TOKEN) characters
+    /// of `A-Z a-z 0-9 _ -`.
     ///
     /// ```
     /// use telegram_api_client::WebhookGuard;
@@ -47,16 +68,24 @@ impl WebhookGuard {
     /// assert!(WebhookGuard::new("").is_err());
     /// let guard = WebhookGuard::new("s3cret").unwrap();
     /// assert_eq!(guard.derived_path().len(), 65);
+    ///
+    /// // Telegram's documented alphabet and limit.
+    /// assert!(WebhookGuard::new("aZ0_-").is_ok());
+    /// assert!(WebhookGuard::new("a".repeat(256)).is_ok());
+    /// assert!(WebhookGuard::new("a".repeat(257)).is_err());
     /// ```
     pub fn new(secret: impl Into<String>) -> crate::error::Result<Self> {
         let secret = secret.into();
         if secret.is_empty() {
-            return Err(crate::error::Error::EmptySecret);
+            return Err(Error::EmptySecret);
         }
-        let digest = Sha256::digest(secret.as_bytes());
-        let derived_path = format!("/{}", hex::encode(digest));
+        // Same rules `setWebhook` applies: rejecting here means a guard can
+        // never be built from a token Telegram would refuse to register.
+        validate_secret(&secret)?;
+        let secret_digest: [u8; 32] = Sha256::digest(secret.as_bytes()).into();
+        let derived_path = format!("/{}", hex::encode(secret_digest));
         Ok(Self {
-            secret,
+            secret_digest,
             derived_path,
         })
     }
@@ -76,8 +105,10 @@ impl WebhookGuard {
 
     /// Checks the `X-Telegram-Bot-Api-Secret-Token` header.
     ///
-    /// The comparison is constant time and length-safe: a missing header, a
-    /// prefix or a NUL-suffixed value never matches.
+    /// The header is hashed and the two digests are compared in constant time,
+    /// so the check reveals neither the secret's length nor how much of a
+    /// candidate matched. A missing header, a prefix or a NUL-suffixed value
+    /// never matches.
     ///
     /// # Errors
     ///
@@ -89,13 +120,18 @@ impl WebhookGuard {
     /// let guard = WebhookGuard::new("s3cret").unwrap();
     /// assert!(guard.verify_secret(Some("s3cret")).is_ok());
     /// assert!(guard.verify_secret(Some("s3cre")).is_err());
+    /// assert!(guard.verify_secret(Some("s3crett")).is_err());
     /// assert!(guard.verify_secret(None).is_err());
     /// ```
     pub fn verify_secret(&self, header: Option<&str>) -> Result<()> {
         let Some(value) = header else {
             return Err(Error::SecretMismatch);
         };
-        if self.secret.as_bytes().ct_eq(value.as_bytes()).into() {
+        // Both sides are fixed-size digests, so the comparison is
+        // length-oblivious: `ct_eq` on the raw secret returned as soon as the
+        // lengths differed, which leaked the configured token's length.
+        let candidate: [u8; 32] = Sha256::digest(value.as_bytes()).into();
+        if bool::from(self.secret_digest.ct_eq(&candidate)) {
             Ok(())
         } else {
             Err(Error::SecretMismatch)

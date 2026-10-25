@@ -12,8 +12,12 @@ pub const MAX_SECRET_TOKEN: usize = 256;
 /// Upper bound for `max_connections` per the Bot API.
 pub const MAX_WEBHOOK_CONNECTIONS: u16 = 100;
 
-/// Rejects secrets Telegram would reject, and secrets that are trivially weak.
-fn validate_secret(secret: &str) -> Result<()> {
+/// Rejects secrets Telegram would reject.
+///
+/// Telegram documents the token as `1`–`256` characters of `A-Z`, `a-z`, `0-9`,
+/// `_` and `-`. Shared with [`crate::WebhookGuard`], so a guard can never be
+/// built from a token `setWebhook` would refuse.
+pub(crate) fn validate_secret(secret: &str) -> Result<()> {
     let length = secret.chars().count();
     if length == 0 {
         return Err(Error::InvalidRequest {
@@ -103,6 +107,32 @@ impl SetWebhook {
     }
 
     /// Sets the secret token echoed back in the header.
+    ///
+    /// Telegram only accepts `1`–`256` characters of `A-Z a-z 0-9 _ -`; check
+    /// the value with [`SetWebhook::validate`] before registering it, or build
+    /// the same secret into a [`WebhookGuard`](crate::WebhookGuard) to verify
+    /// the header on the way back.
+    ///
+    /// ```
+    /// use telegram_api_client::SetWebhook;
+    ///
+    /// let request = SetWebhook::new("https://example.com/hook").with_secret("s3cret_1-2");
+    /// assert_eq!(request.secret_token.as_deref(), Some("s3cret_1-2"));
+    /// assert!(request.validate().is_ok());
+    ///
+    /// // The secret never shows up in Debug output.
+    /// assert!(!format!("{request:?}").contains("s3cret"));
+    ///
+    /// // Illegal characters and an over-long token are rejected by validate().
+    /// assert!(SetWebhook::new("https://example.com/hook")
+    ///     .with_secret("has space")
+    ///     .validate()
+    ///     .is_err());
+    /// assert!(SetWebhook::new("https://example.com/hook")
+    ///     .with_secret("a".repeat(257))
+    ///     .validate()
+    ///     .is_err());
+    /// ```
     #[must_use]
     pub fn with_secret(mut self, secret: impl Into<String>) -> Self {
         self.secret_token = Some(secret.into());

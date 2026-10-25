@@ -55,3 +55,88 @@ fn debug_does_not_leak_the_secret() {
     let guard = WebhookGuard::new("super-secret").unwrap();
     assert!(!format!("{guard:?}").contains("super-secret"));
 }
+
+#[test]
+fn secret_comparison_does_not_depend_on_the_configured_length() {
+    // The guard used to `ct_eq` the raw secret against the header, and
+    // `subtle::ConstantTimeEq` returns at the length check — an attacker who
+    // could time the endpoint learned how long the token is. Both sides are now
+    // SHA-256 digests, so every candidate costs the same 32 bytes of comparison
+    // whatever its length.
+    for secret in ["a", "ab", "abcdefghijklmnopqrstuvwxyz0123456789-_-_-_-"] {
+        let guard = WebhookGuard::new(secret).unwrap();
+        assert!(
+            guard.verify_secret(Some(secret)).is_ok(),
+            "the exact secret verifies ({})",
+            secret.len()
+        );
+
+        // The three shapes a length side channel would have to distinguish:
+        // shorter, equal-length-but-wrong, longer.
+        let shorter = &secret[..secret.len() - 1];
+        assert!(guard.verify_secret(Some(shorter)).is_err(), "prefix");
+        let mut same_length = secret.to_string();
+        same_length.pop();
+        same_length.push(if secret.ends_with('a') { 'b' } else { 'a' });
+        assert!(
+            guard.verify_secret(Some(&same_length)).is_err(),
+            "same length"
+        );
+        let longer = format!("{secret}x");
+        assert!(guard.verify_secret(Some(&longer)).is_err(), "extension");
+    }
+
+    // Secrets of very different lengths are indistinguishable by digest size:
+    // both guards store exactly one 32-byte digest, so `size_of` does not leak
+    // the token either.
+    let short = WebhookGuard::new("a").unwrap();
+    let long = WebhookGuard::new("a".repeat(256)).unwrap();
+    assert_eq!(std::mem::size_of_val(&short), std::mem::size_of_val(&long));
+}
+
+#[test]
+fn a_guard_only_accepts_secrets_telegram_would_register() {
+    // Telegram's documented contract: 1..=256 characters of A-Z a-z 0-9 _ -.
+    for accepted in ["a", "aZ0_-", &"a".repeat(256), "0_0-0"] {
+        assert!(
+            WebhookGuard::new(accepted).is_ok(),
+            "{accepted:.8}… should be accepted"
+        );
+    }
+    for rejected in [
+        "a".repeat(257),
+        "has space".to_string(),
+        "ümlaut".to_string(),
+        "per.iod".to_string(),
+        "new\nline".to_string(),
+        "sl/ash".to_string(),
+    ] {
+        assert!(
+            WebhookGuard::new(&rejected).is_err(),
+            "{rejected:.8}… is not a token Telegram accepts"
+        );
+    }
+
+    // Boundary pair on the length limit, stated explicitly.
+    assert!(WebhookGuard::new("a".repeat(256)).is_ok());
+    assert!(WebhookGuard::new("a".repeat(257)).is_err());
+
+    // Empty stays the dedicated error, not a generic validation failure.
+    assert!(matches!(WebhookGuard::new(""), Err(Error::EmptySecret)));
+}
+
+#[test]
+fn a_guard_and_a_set_webhook_agree_on_what_a_secret_is() {
+    use telegram_api_client::SetWebhook;
+
+    // The guard now runs the same validator as `setWebhook`, so the two cannot
+    // drift apart again.
+    for secret in ["aZ0_-", "a", &"a".repeat(256), "has space", "ümlaut"] {
+        let request = SetWebhook::new("https://example.com/hook").with_secret(secret);
+        assert_eq!(
+            WebhookGuard::new(secret).is_ok(),
+            request.validate().is_ok(),
+            "the guard and setWebhook disagree about {secret:.8}…"
+        );
+    }
+}
