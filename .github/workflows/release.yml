@@ -34,6 +34,15 @@ jobs:
             echo "::error::tag $tag does not match Cargo.toml version $crate"
             exit 1
           fi
+      # A published version is immutable, so the changelog entry has to exist
+      # before the tag ships, not after.
+      - name: Changelog documents this version
+        run: |
+          version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')
+          if ! grep -q "^## \[$version\]" CHANGELOG.md; then
+            echo "::error::CHANGELOG.md has no '## [$version]' section"
+            exit 1
+          fi
       # A version on crates.io is immutable: re-running a release for a version
       # that already exists must be a no-op, not a red build.
       - name: Version already published?

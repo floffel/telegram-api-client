@@ -33,3 +33,22 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: EmbarkStudios/cargo-deny-action@v2
+
+  # The MSRV in Cargo.toml (`rust-version`) and in the README is a promise to
+  # consumers. This job compiles the crate on exactly that toolchain, so a
+  # dependency that silently raises its own MSRV turns the build red here
+  # instead of in a consumer's CI.
+  msrv:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Pinned toolchain matches the manifest
+        run: |
+          declared=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].rust_version')
+          if [ "$declared" != "1.89" ]; then
+            echo "::error::Cargo.toml declares rust-version $declared but this job pins 1.89 - update both"
+            exit 1
+          fi
+      - uses: dtolnay/rust-toolchain@1.89
+      - run: cargo check --all-targets --all-features
+      - run: cargo check --no-default-features

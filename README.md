@@ -269,6 +269,37 @@ invariants, including "no state-changing request is auto-retried after a 5xx"),
 public builder), plus `api.rs`, `edge_cases.rs`, `webhook.rs`, `update.rs`,
 `client.rs` and `concurrency.rs`.
 
+## Versioning, MSRV and changelog
+
+The crate follows [SemVer 2.0.0](https://semver.org/spec/v2.0.0.html). While the
+major version is `0`, a minor bump (`0.1` → `0.2`) may break the API and a patch
+bump (`0.1.1` → `0.1.2`) is guaranteed to be additive or a fix: nothing that
+compiled before stops compiling, and nothing that behaved correctly starts
+failing. Concretely, these are **patch-level** changes here:
+
+- new methods, new `with_*` builder setters, new types;
+- a new variant on a `#[non_exhaustive]` enum — the error enum and the payload
+  enums that can grow are marked that way precisely so this stays patch-level;
+- documentation, dependency patch/minor updates, and stricter validation for
+  input the Bot API would have rejected anyway.
+
+**Breaking** (minor under `0.x`, major from `1.0`): removing or renaming a
+public item, changing a method signature, adding a variant to an enum that is
+*not* `#[non_exhaustive]`, adding a required parameter to a request type, or
+turning a currently-ignored input into an error.
+
+Every release gets an entry in [CHANGELOG.md](CHANGELOG.md); the git tag carries
+no notes of its own, the changelog is the record.
+
+**MSRV:** Rust **1.89**, as declared in `Cargo.toml` (`rust-version`). CI
+verifies the minimum on that exact toolchain instead of only claiming it.
+Raising it counts as a breaking change (minor while `0.x`), because it can break
+a consumer's build without anything in this crate changing; it never happens in
+a patch release.
+
+**docs.rs** builds with `--all-features`, so the `http` transport and the
+offline `MockTransport` path are both visible in the rendered documentation.
+
 ## Licence
 
 Apache-2.0 OR MIT.
