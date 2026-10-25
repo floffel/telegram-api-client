@@ -219,6 +219,13 @@ compiling and fails loudly instead of silently dropping the file.
 - **Concurrency.** `TelegramClient<T>` is `Send + Sync` when `T` is, and is
   cheap to clone; the test suite hammers one client from 64 tasks. Every method
   takes `&self`.
+- **TLS trust store.** The `http` feature builds `reqwest` with
+  `default-features = false, features = ["json", "rustls"]`. Since `reqwest`
+  0.13 the `rustls` feature validates against the *platform* trust store
+  (`rustls-platform-verifier`) and the bundled `webpki-roots` feature is gone,
+  so a minimal container without `ca-certificates` now fails to connect instead
+  of trusting a shipped bundle. Install a CA bundle there, or pass your own
+  `reqwest::Client` through the `Transport` trait.
 
 ## Deliberate omissions
 
