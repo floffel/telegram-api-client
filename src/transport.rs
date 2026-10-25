@@ -349,9 +349,18 @@ pub trait Transport {
     /// # Errors
     ///
     /// Whatever the implementation produces: network failures, non-JSON
-    /// bodies, and Bot API `ok: false` answers. A failure observed *after* the
-    /// request was written must be [`Error::Ambiguous`], a failure before it
-    /// [`Error::Transport`] — the client bases its retry decision on that split.
+    /// bodies, and Bot API `ok: false` answers.
+    ///
+    /// The client decides about retries from the *phase* of the failure, so say
+    /// which one it was:
+    ///
+    /// * [`Error::NotSent`] — connect, DNS or TLS failed, so nothing was
+    ///   written and repeating the request cannot duplicate anything;
+    /// * [`Error::Ambiguous`] — the request was written and the outcome is
+    ///   unknown (timeout, reset, truncated response);
+    /// * [`Error::Transport`] — only if the implementation cannot tell. The
+    ///   client then treats a state-changing method as ambiguous (no retry) and
+    ///   a read as safely repeatable.
     fn post_json(
         &self,
         url: &str,
@@ -483,8 +492,9 @@ async fn execute(request: reqwest::RequestBuilder, url: &str) -> Result<serde_js
 #[cfg(feature = "http")]
 fn classify_send_error(url: &str, error: reqwest::Error) -> Error {
     if error.is_connect() {
-        // DNS, TCP connect, TLS handshake: the body never left the machine.
-        Error::Transport {
+        // DNS, TCP connect, TLS handshake: the body never left the machine, so
+        // repeating the request cannot duplicate anything.
+        Error::NotSent {
             message: error.to_string(),
             source: Some(Box::new(error)),
         }
@@ -632,8 +642,12 @@ pub enum MockReply {
         /// Error description Telegram would send.
         description: String,
     },
-    /// A transport-level failure before anything was written (no response).
+    /// A transport-level failure with no phase information: the implementation
+    /// could not say whether anything was written.
     Transport(String),
+    /// A transport-level failure before anything was written (connect, DNS,
+    /// TLS): nothing reached Telegram, so a retry cannot duplicate.
+    NotSent(String),
     /// A transport-level failure after the request was written: delivery is
     /// unknown.
     Ambiguous(String),
@@ -682,6 +696,35 @@ impl MockReply {
         Self::Ambiguous(message.into())
     }
 
+    /// A failure before the request was written: connect, DNS, TLS.
+    ///
+    /// ```rust
+    /// use telegram_api_client::MockReply;
+    ///
+    /// let error = MockReply::not_sent("dns: name resolution failed")
+    ///     .into_result()
+    ///     .unwrap_err();
+    /// assert!(error.is_retryable(), "nothing was written, so a send may repeat");
+    /// ```
+    #[must_use]
+    pub fn not_sent(message: impl Into<String>) -> Self {
+        Self::NotSent(message.into())
+    }
+
+    /// A failure whose phase the transport did not determine.
+    ///
+    /// ```rust
+    /// use telegram_api_client::MockReply;
+    ///
+    /// let error = MockReply::unphased("connection closed").into_result().unwrap_err();
+    /// // Not retryable on its own: `classify_for` decides per method.
+    /// assert!(!error.is_retryable());
+    /// ```
+    #[must_use]
+    pub fn unphased(message: impl Into<String>) -> Self {
+        Self::Transport(message.into())
+    }
+
     /// The value this reply resolves to, using the same classification the
     /// HTTP transport applies.
     ///
@@ -712,6 +755,10 @@ impl MockReply {
                 description,
             }),
             Self::Transport(message) => Err(Error::Transport {
+                message,
+                source: None,
+            }),
+            Self::NotSent(message) => Err(Error::NotSent {
                 message,
                 source: None,
             }),

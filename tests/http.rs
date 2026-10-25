@@ -181,7 +181,9 @@ async fn a_refused_connection_is_a_pre_write_error() {
         .me()
         .await
         .expect_err("nothing listens there");
-    assert!(matches!(error, Error::Transport { .. }), "{error:?}");
+    // `NotSent`, not `Transport`: the transport proved the body never left the
+    // machine, which is what makes retrying a send safe.
+    assert!(matches!(error, Error::NotSent { .. }), "{error:?}");
     assert!(error.is_retryable(), "a connect failure is safe to retry");
     assert!(!error.is_ambiguous());
 }
@@ -202,7 +204,10 @@ async fn a_refused_connection_is_retried_within_the_budget() {
         ));
 
     let error = client.me().await.expect_err("nothing listens there");
-    assert!(matches!(error, Error::Transport { .. }), "{error:?}");
+    assert!(matches!(error, Error::NotSent { .. }), "{error:?}");
+    // Retried up to the budget: one call per attempt, and the error is the
+    // last one.
+    assert!(error.is_retryable());
 
     // A JSON-only mock never sees a socket: it proves the client stays generic.
     let mock = TelegramClient::new("1:A", MockTransport::new());

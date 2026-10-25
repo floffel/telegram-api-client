@@ -48,9 +48,29 @@ pub enum Error {
         source: Option<serde_json::Error>,
     },
     /// The request never produced a usable response.
+    ///
+    /// This variant is the *undecided* case: it says a transport failed without
+    /// saying whether anything was written. A non-idempotent method is
+    /// therefore treated as [`Error::Ambiguous`] by [`Error::classify_for`] —
+    /// transports should report pre-write failures as [`Error::NotSent`] and
+    /// post-write failures as [`Error::Ambiguous`] instead of using this.
     #[error("transport error: {message}")]
     Transport {
         /// What went wrong, in prose.
+        message: String,
+        /// The underlying HTTP/client failure, when there is one.
+        #[source]
+        source: Option<Box<dyn std::error::Error + Send + Sync + 'static>>,
+    },
+    /// The request was never written: connecting failed, DNS failed, TLS
+    /// failed — nothing reached Telegram.
+    ///
+    /// Safe to repeat for *any* method, including a send, which is why it is
+    /// retryable. The counterpart of [`Error::Ambiguous`]: the two together
+    /// cover what [`Error::Transport`] used to blur.
+    #[error("request not sent: {message}")]
+    NotSent {
+        /// What went wrong before the request was written.
         message: String,
         /// The underlying HTTP/client failure, when there is one.
         #[source]
@@ -121,30 +141,41 @@ impl Error {
     /// Whether re-sending the exact same request can plausibly succeed without
     /// risking a duplicate.
     ///
-    /// `true` for rate limits (the server rejected before processing), pre-write
-    /// connection failures (DNS, connect, TLS — nothing was sent) and 5xx
-    /// answers — the last one only because the caller is expected to have
-    /// classified the error for its method first, see [`Self::classify_for`].
-    /// `false` for everything a retry cannot fix, and for
-    /// [`Error::Ambiguous`], where a retry may duplicate the message.
+    /// `true` for rate limits (the server rejected before processing), 5xx
+    /// answers (the caller is expected to have classified the error for its
+    /// method first, see [`Self::classify_for`]) and [`Error::NotSent`], where
+    /// the transport proved nothing was written.
+    ///
+    /// `false` for everything a retry cannot fix, for [`Error::Ambiguous`],
+    /// where a retry may duplicate the message, and for the unphased
+    /// [`Error::Transport`] — that one is only a statement that *something*
+    /// failed, so it must be classified for its method before it is retried.
     ///
     /// ```rust
     /// use telegram_api_client::Error;
     ///
     /// assert!(Error::Api { code: 502, description: "Bad Gateway".into() }.is_retryable());
-    /// assert!(Error::Transport { message: "dns".into(), source: None }.is_retryable());
+    /// assert!(Error::not_sent("dns: name resolution failed").is_retryable());
     /// assert!(!Error::Api { code: 403, description: "Forbidden".into() }.is_retryable());
     ///
     /// // A 5xx whose request was a send: classified as ambiguous, not retryable.
     /// let send = Error::Api { code: 502, description: "Bad Gateway".into() }.classify_for("sendMessage");
     /// assert!(!send.is_retryable());
+    ///
+    /// // An unphased transport failure is never retryable on its own: the
+    /// // caller has to say what happened, and `classify_for` does.
+    /// let unphased = || Error::Transport { message: "boom".into(), source: None };
+    /// assert!(!unphased().is_retryable());
+    /// assert!(unphased().classify_for("getMe").is_retryable());
+    /// assert!(unphased().classify_for("sendMessage").is_ambiguous());
     /// ```
     #[must_use]
     pub fn is_retryable(&self) -> bool {
         match self {
-            Self::RateLimited { .. } | Self::Transport { .. } => true,
+            Self::RateLimited { .. } | Self::NotSent { .. } => true,
             Self::Api { code, .. } => *code == 429 || *code >= 500,
-            Self::EmptySecret
+            Self::Transport { .. }
+            | Self::EmptySecret
             | Self::SecretMismatch
             | Self::PathMismatch
             | Self::Payload { .. }
@@ -175,12 +206,19 @@ impl Error {
         matches!(self, Self::Ambiguous { .. })
     }
 
-    /// Re-classifies a failure for `method`, turning a 5xx on a state-changing
-    /// method into [`Error::Ambiguous`].
+    /// Re-classifies a failure for `method`.
     ///
-    /// The Bot API answers 5xx both before and after it accepted a message, so
-    /// a 5xx on anything but the read-only `get*` family means "delivery
-    /// unknown". Read calls stay [`Error::Api`] and therefore retryable.
+    /// Two failures carry no phase information and have to be resolved by the
+    /// method's idempotency:
+    ///
+    /// * a 5xx on a state-changing method becomes [`Error::Ambiguous`] — the
+    ///   Bot API answers 5xx both before and after it accepted a message, so
+    ///   delivery is unknown;
+    /// * an unphased [`Error::Transport`] becomes [`Error::Ambiguous`] for a
+    ///   state-changing method and [`Error::NotSent`] for a read.
+    ///
+    /// Read calls stay retryable either way; a send is never retried on an
+    /// unknown outcome.
     ///
     /// ```rust
     /// use telegram_api_client::Error;
@@ -196,6 +234,12 @@ impl Error {
     /// // A 400 is terminal either way, and a 429 stays retryable.
     /// let bad = Error::Api { code: 400, description: "Bad Request".into() }.classify_for("sendMessage");
     /// assert!(!bad.is_ambiguous() && !bad.is_retryable());
+    ///
+    /// // A transport that could not say when it failed is resolved the same
+    /// // way: ambiguous for a send, safely repeatable for a read.
+    /// let unphased = || Error::Transport { message: "reset".into(), source: None };
+    /// assert!(unphased().classify_for("sendMessage").is_ambiguous());
+    /// assert!(unphased().classify_for("getChat").is_retryable());
     /// ```
     #[must_use]
     pub fn classify_for(self, method: &str) -> Self {
@@ -209,6 +253,16 @@ impl Error {
                     source: None,
                 }
             }
+            Self::Transport { message, source } if crate::retry::is_idempotent(method) => {
+                Self::NotSent { message, source }
+            }
+            Self::Transport { message, source } => Self::Ambiguous {
+                method: method.to_string(),
+                detail: format!(
+                    "transport failed without saying whether the request was written: {message}"
+                ),
+                source,
+            },
             Self::Ambiguous {
                 method: current,
                 detail,
@@ -241,6 +295,29 @@ impl Error {
         Self::Ambiguous {
             method: method.into(),
             detail: detail.into(),
+            source: None,
+        }
+    }
+
+    /// Reports a failure that provably happened before the request was written.
+    ///
+    /// Transports call this when connecting, DNS or the TLS handshake failed,
+    /// so nothing reached Telegram and repeating the request cannot duplicate
+    /// anything. The result is [retryable](Self::is_retryable) for every
+    /// method, sends included.
+    ///
+    /// ```rust
+    /// use telegram_api_client::Error;
+    ///
+    /// let error = Error::not_sent("dns: name resolution failed");
+    /// assert!(error.is_retryable());
+    /// assert!(!error.is_ambiguous());
+    /// assert!(error.to_string().contains("name resolution"));
+    /// ```
+    #[must_use]
+    pub fn not_sent(message: impl Into<String>) -> Self {
+        Self::NotSent {
+            message: message.into(),
             source: None,
         }
     }
@@ -333,28 +410,44 @@ impl Error {
     }
 }
 
-/// Extracts the number from `"Too Many Requests: retry after 12"`.
+/// Extracts the number of seconds from a Bot API description.
 ///
-/// Returns `None` when there is no marker or no positive number after it.
+/// Telegram writes the hint in two shapes: `"Too Many Requests: retry after
+/// 12"` / `"retry_after 12"` on the modern path, and `"Flood control exceeded.
+/// Retry in 12 seconds"` for flood control. All three markers are recognised;
+/// the leftmost one wins, so a description that mentions both is read in the
+/// order Telegram wrote it.
 ///
-/// ```
+/// Returns `None` when there is no marker, no positive number after it, or a
+/// number that does not fit in `u64`.
+///
+/// ```rust
 /// use telegram_api_client::parse_retry_after;
 ///
 /// assert_eq!(parse_retry_after("Too Many Requests: retry after 5"), Some(5));
-/// assert_eq!(parse_retry_after("Flood control exceeded. Retry in 9s"), None);
+/// assert_eq!(parse_retry_after("retry_after 7"), Some(7));
+/// assert_eq!(parse_retry_after("Flood control exceeded. Retry in 9s"), Some(9));
+/// assert_eq!(parse_retry_after("Flood control exceeded. Retry in 12 seconds"), Some(12));
+///
+/// // No marker, no number, zero or out of range: no usable hint.
 /// assert_eq!(parse_retry_after("no digits here"), None);
+/// assert_eq!(parse_retry_after("Retry in "), None);
+/// assert_eq!(parse_retry_after("Retry in 0s"), None);
+/// assert_eq!(parse_retry_after("Retry in 99999999999999999999s"), None);
 /// ```
 #[must_use]
 pub fn parse_retry_after(description: &str) -> Option<u64> {
+    /// Markers Telegram uses, longest-first is irrelevant because the leftmost
+    /// match wins.
+    const MARKERS: [&str; 3] = ["retry after", "retry_after", "retry in"];
+
     let lower = description.to_ascii_lowercase();
-    let marker = ["retry after ", "retry_after "]
+    let (index, marker) = MARKERS
         .iter()
-        .find_map(|needle| lower.find(needle).map(|index| index + needle.len()))?;
-    let digits: String = lower[marker..]
-        .chars()
-        .skip_while(|c| c.is_whitespace())
-        .take_while(char::is_ascii_digit)
-        .collect();
+        .filter_map(|needle| lower.find(needle).map(|index| (index, *needle)))
+        .min_by_key(|(index, _)| *index)?;
+    let rest = lower[index + marker.len()..].trim_start_matches([' ', '\t', ':', '=']);
+    let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
     digits.parse::<u64>().ok().filter(|seconds| *seconds > 0)
 }
 

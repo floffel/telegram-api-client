@@ -121,12 +121,18 @@ key to distinguish the last two after the fact:
 
 | Failure | What happened | Client behaviour | Caller should |
 | --- | --- | --- | --- |
-| 429 `Too Many Requests` | rejected before processing | **retried automatically**, waiting `retry_after` | nothing, unless the budget runs out |
-| connect / DNS / TLS error | the request never left the machine | **retried automatically** | nothing |
+| 429 `Too Many Requests` | rejected before processing | **retried automatically**, waiting exactly `retry_after`; if the hint exceeds `max_delay` the error is returned instead of retrying early | nothing, unless the budget runs out |
+| connect / DNS / TLS error (`Error::NotSent`) | the request never left the machine | **retried automatically**, even for a send | nothing |
+| transport failure with no phase (`Error::Transport`) | the transport could not say whether anything was written | ambiguous for a send, retried for a `get*` | decide from your own ledger |
 | 5xx on a `get*` method | read failed, nothing changed | retried automatically (idempotent) | nothing |
 | 5xx on a state-changing method | the message **may** have been accepted | `Error::Ambiguous`, **never retried** | decide from your own ledger |
-| timeout / reset after the write | unknown | `Error::Ambiguous`, **never retried** | decide from your own ledger |
+| timeout / reset after the write (`Error::Ambiguous`) | unknown | `Error::Ambiguous`, **never retried** | decide from your own ledger |
 | 4xx (400/401/403/404/409, …) | rejected, nothing happened | returned immediately | fix the request |
+
+Custom transports report the phase through three variants: `Error::NotSent`
+(nothing written), `Error::Ambiguous` (written, outcome unknown) and — only if
+the transport genuinely cannot tell — `Error::Transport`, which the client
+resolves per method.
 
 So the crate is **at-most-once by default for ambiguous failures**: a message
 is never silently duplicated, and a call never becomes at-least-once behind your

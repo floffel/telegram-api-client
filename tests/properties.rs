@@ -139,9 +139,10 @@ proptest! {
         }
     }
 
-    /// The retry hint from Telegram wins over our own curve.
+    /// The retry hint from Telegram is authoritative: never shortened, and
+    /// used to refuse the retry when it is longer than the ceiling.
     #[test]
-    fn retry_hint_wins(retry_after in 0_u64..600, attempt in 0_u8..=8) {
+    fn retry_hint_wins(retry_after in 0_u64..600, attempt in 1_u8..=8) {
         let policy = RetryPolicy::new(5, Duration::from_millis(10), Duration::from_secs(60));
         let error = telegram_api_client::Error::RateLimited {
             retry_after: Some(retry_after),
@@ -150,14 +151,77 @@ proptest! {
         };
         prop_assert_eq!(
             policy.delay_for_error(attempt.into(), &error),
-            Duration::from_secs(retry_after).min(policy.max_delay)
+            Duration::from_secs(retry_after),
+            "the hint is returned verbatim, never clamped to max_delay"
         );
+        // The retry is taken exactly when the hint fits under the ceiling.
+        prop_assert_eq!(
+            policy.should_retry(1, &error),
+            Duration::from_secs(retry_after) <= policy.max_delay
+        );
+    }
+
+    /// The same rule for the failure shape that carries no phase at all: an
+    /// unphased transport error must never be retried on a state-changing
+    /// method, whatever the message or the attempt budget.
+    #[test]
+    fn no_non_idempotent_request_is_retried_after_an_unphased_transport_failure(
+        method in "[A-Za-z]{0,24}",
+        message in "[A-Za-z0-9 :.]{0,40}",
+    ) {
+        prop_assume!(!is_idempotent(&method));
+        let error = Error::Transport {
+            message,
+            source: None,
+        }
+        .classify_for(&method);
+
+        prop_assert!(error.is_ambiguous(), "{method} must be ambiguous");
+        prop_assert!(!error.is_retryable());
+        prop_assert!(!RetryPolicy::new(100, Duration::from_millis(1), Duration::from_secs(1))
+            .should_retry(1, &error));
+    }
+
+    /// A failure that provably happened before the write is retryable for every
+    /// method, sends included.
+    #[test]
+    fn a_not_sent_failure_is_retryable_for_every_method(method in "[A-Za-z]{0,24}") {
+        let error = Error::not_sent("connect refused").classify_for(&method);
+        prop_assert!(error.is_retryable());
+        prop_assert!(!error.is_ambiguous());
+        prop_assert!(RetryPolicy::default().should_retry(1, &error));
+    }
+
+    /// `parse_retry_after` understands every shape Telegram writes, including
+    /// the flood-control one, and never invents a number.
+    #[test]
+    fn parse_retry_after_understands_the_flood_control_shape(
+        prefix in "[0-9: .]{0,10}",
+        seconds in 1_u64..1_000_000,
+        suffix in " ?[A-Za-z]{0,12}",
+    ) {
+        for marker in ["retry after ", "retry_after ", "retry in "] {
+            let description = format!("{prefix}{marker}{seconds}{suffix}");
+            prop_assert_eq!(
+                telegram_api_client::parse_retry_after(&description),
+                Some(seconds),
+                "{}",
+                description.clone()
+            );
+            let without_marker = format!("{prefix}too many requests{suffix}");
+            prop_assert_eq!(
+                telegram_api_client::parse_retry_after(&without_marker),
+                None,
+                "{}",
+                without_marker.clone()
+            );
+        }
     }
 
     /// `parse_retry_after` finds exactly the number after the marker and never
     /// invents one otherwise.
     #[test]
-    fn parse_retry_after_extracts_the_number(prefix in "[A-Za-z: .]{0,20}", seconds in 1_u64..1_000_000) {
+    fn parse_retry_after_extracts_the_number(prefix in "[0-9: .]{0,20}", seconds in 1_u64..1_000_000) {
         let description = format!("{prefix}retry after {seconds}");
         prop_assert_eq!(telegram_api_client::parse_retry_after(&description), Some(seconds));
 
