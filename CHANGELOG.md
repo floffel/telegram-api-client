@@ -8,6 +8,46 @@ means for this API is spelled out in the README under
 
 ## [Unreleased]
 
+## [0.1.3] - 2026-10-25
+
+### Added
+
+- `Error::NotSent` for failures that provably happened before the request was
+  written (connect, DNS, TLS). It is retryable for every method, sends
+  included, and is what `ReqwestTransport` now reports for a refused
+  connection. `Error::Transport` keeps its role as the *unphased* failure and is
+  no longer retryable on its own: `classify_for` turns it into `Ambiguous` for a
+  state-changing method and `NotSent` for a read.
+- `MockReply::not_sent()` and `MockReply::unphased()` so a mock transport can
+  exercise all three phases.
+
+### Changed
+
+- `RetryPolicy::should_retry` refuses a retry whose `retry_after` is longer than
+  `max_delay` instead of retrying early, and `delay_for_error` returns Telegram's
+  hint unchanged instead of clamping it. A 60 s hint with the default 30 s
+  ceiling now ends the call with `Error::RateLimited`.
+- `delay_for_error(attempt, …)` documents `attempt` as the 1-based attempt that
+  failed and computes the backoff from `attempt - 1`: the first retry waits
+  `base_delay`, not `2 * base_delay`.
+- `parse_retry_after` also understands the flood-control wording
+  (`"Flood control exceeded. Retry in 12 seconds"`) and still rejects zero,
+  missing and overflowing values.
+- `WebhookGuard` stores only `sha256(secret)` and compares digests, so the
+  secret comparison no longer leaks the configured token's length; the guard also
+  applies `setWebhook`'s secret rules and refuses to be built from a token
+  Telegram would not register.
+- `ThreadSleeper` tracks actual completion with an atomic flag instead of
+  treating a second poll as "the sleep finished", and no longer completes
+  early when it cannot spawn a thread.
+
+### Fixed
+
+- A non-idempotent request can no longer be retried after a transport failure
+  whose phase is unknown, which was the last path that could duplicate a message.
+- A spurious or repeated poll of the default sleeper no longer skips the backoff
+  or rate-limit delay.
+
 ## [0.1.2] - 2026-10-25
 
 ### Changed
