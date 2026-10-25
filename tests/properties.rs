@@ -5,8 +5,9 @@ use proptest::prelude::*;
 use serde_json::{Map, Value};
 use std::time::Duration;
 use telegram_api_client::{
-    send::MAX_POLL_OPTION, ChatId, EntityKind, InputMedia, InputMediaKind, MessageEntity,
-    ParseMode, PollType, RetryPolicy, SendMessage, SendPoll, Update, UpdateCursor,
+    guess_mime, is_idempotent, is_valid_mime, send::MAX_POLL_OPTION, ChatId, EntityKind, Error,
+    InputMedia, InputMediaKind, MessageEntity, MultipartFile, MultipartForm, ParseMode, PollType,
+    RetryPolicy, SendMessage, SendPoll, Update, UpdateCursor,
 };
 
 proptest! {
@@ -206,4 +207,187 @@ proptest! {
         prop_assert_eq!(poll.validate().is_ok(), index < count);
         prop_assert_eq!(poll.kind, Some(PollType::Quiz));
     }
+
+    // ---- delivery classification -----------------------------------------
+
+    /// The rule the delivery contract rests on: no state-changing method is
+    /// ever retried after a 5xx, for any 5xx code and any method name.
+    #[test]
+    fn no_non_idempotent_request_is_retried_after_a_5xx(
+        method in "[A-Za-z]{0,24}",
+        code in 500_i64..=599,
+    ) {
+        prop_assume!(!is_idempotent(&method));
+        let error = Error::Api {
+            code,
+            description: "upstream".to_string(),
+        }
+        .classify_for(&method);
+
+        prop_assert!(error.is_ambiguous(), "{method} {code} must be ambiguous");
+        prop_assert!(!error.is_retryable());
+        prop_assert!(!RetryPolicy::default().should_retry(1, &error));
+        prop_assert!(!RetryPolicy::new(100, Duration::from_millis(1), Duration::from_secs(1))
+            .should_retry(1, &error));
+    }
+
+    /// Reads are idempotent, so the same 5xx stays retryable for them.
+    #[test]
+    fn a_read_stays_retryable_after_a_5xx(
+        suffix in "[A-Z][A-Za-z]{0,12}",
+        code in 500_i64..=599,
+    ) {
+        let method = format!("get{suffix}");
+        prop_assert!(is_idempotent(&method));
+        let error = Error::Api {
+            code,
+            description: "upstream".to_string(),
+        }
+        .classify_for(&method);
+
+        prop_assert!(error.is_retryable());
+        prop_assert!(!error.is_ambiguous());
+    }
+
+    /// A 429 is safe to repeat whatever the method: the server rejected before
+    /// processing.
+    #[test]
+    fn a_429_is_always_retryable(method in "[A-Za-z]{0,24}", hint in any::<Option<u64>>()) {
+        let error = Error::RateLimited {
+            retry_after: hint,
+            code: 429,
+            description: "Too Many Requests".to_string(),
+        }
+        .classify_for(&method);
+
+        prop_assert!(error.is_retryable());
+        prop_assert!(!error.is_ambiguous());
+        prop_assert_eq!(error.retry_after().is_some(), hint.is_some());
+    }
+
+    /// `is_idempotent` is exactly the `get*` family with an uppercase suffix.
+    #[test]
+    fn idempotency_is_the_get_family(method in "[A-Za-z]{0,10}") {
+        let expected = method
+            .strip_prefix("get")
+            .is_some_and(|rest| rest.starts_with(|c: char| c.is_ascii_uppercase()));
+        prop_assert_eq!(is_idempotent(&method), expected);
+    }
+
+    // ---- upload encoders --------------------------------------------------
+
+    /// Guessed MIME types are always syntactically valid, whatever the name.
+    #[test]
+    fn guessed_mime_types_are_valid(name in "\\PC*") {
+        prop_assert!(
+            is_valid_mime(guess_mime(&name)),
+            "guess for {name:?} was {:?}",
+            guess_mime(&name)
+        );
+    }
+
+    /// A valid MIME type has exactly one slash and no whitespace.
+    #[test]
+    fn valid_mime_types_have_one_slash(mime in "\\PC*") {
+        if is_valid_mime(&mime) {
+            prop_assert_eq!(mime.matches('/').count(), 1);
+            prop_assert!(!mime.chars().any(char::is_whitespace));
+        }
+    }
+
+    /// Field values and file bytes survive the multipart encoding byte for byte,
+    /// and the payload starts right after the part's blank line.
+    #[test]
+    fn multipart_round_trips_payloads(
+        field_value in "\\PC*",
+        filename in "\\PC*",
+        bytes in prop::collection::vec(any::<u8>(), 0..64),
+    ) {
+        let form = MultipartForm::new()
+            .field("caption", field_value.clone())
+            .with_file(MultipartFile::new(
+                "photo",
+                filename.clone(),
+                "application/octet-stream",
+                bytes.clone(),
+            ));
+        let boundary = form.boundary();
+        let body = form.encode(&boundary);
+
+        // One opening delimiter per part, one closing delimiter at the end.
+        let opening = format!("--{boundary}\r\n").into_bytes();
+        let closing = format!("--{boundary}--\r\n").into_bytes();
+        prop_assert_eq!(count(&body, &opening), 2);
+        prop_assert!(body.ends_with(&closing));
+
+        // The field payload sits directly after its header terminator.
+        let first_header_end = position(&body, b"\r\n\r\n").expect("field header ends");
+        let value_start = first_header_end + 4;
+        prop_assert_eq!(
+            &body[value_start..value_start + field_value.len()],
+            field_value.as_bytes()
+        );
+
+        // Same for the file payload.
+        let file_header_start =
+            position(&body[value_start..], &opening).expect("file part starts") + value_start;
+        let file_header = &body[file_header_start + opening.len()..];
+        let file_header_end = position(file_header, b"\r\n\r\n").expect("file header ends");
+        let file_payload = file_header_start + opening.len() + file_header_end + 4;
+        prop_assert_eq!(&body[file_payload..file_payload + bytes.len()], &bytes[..]);
+    }
+
+    /// A hostile file name cannot add a header line: the header block of a part
+    /// always holds exactly its two `CRLF`-terminated header lines.
+    #[test]
+    fn file_names_cannot_inject_headers(filename in "\\PC*") {
+        let form = MultipartForm::new().with_file(MultipartFile::new(
+            "photo",
+            filename.clone(),
+            "image/png",
+            vec![1],
+        ));
+        let boundary = form.boundary();
+        let body = form.encode(&boundary);
+        let opening = format!("--{boundary}\r\n").into_bytes();
+        let start = position(&body, &opening).expect("part starts") + opening.len();
+        let header_end = position(&body[start..], b"\r\n\r\n").expect("header ends");
+        let header = &body[start..start + header_end];
+        let rendered = String::from_utf8_lossy(header).into_owned();
+
+        // Two header lines, so exactly one line break between them: a third
+        // would mean a smuggled header.
+        prop_assert_eq!(count(header, b"\r\n"), 1, "header block was {}", rendered);
+        prop_assert!(!header.starts_with(b"\r\n"));
+    }
+
+    /// The boundary is a pure function of the content.
+    #[test]
+    fn boundaries_are_deterministic(value in "\\PC*") {
+        let a = MultipartForm::new().field("caption", value.clone());
+        let b = MultipartForm::new().field("caption", value.clone());
+        prop_assert_eq!(a.boundary(), b.boundary());
+        prop_assert!(a.boundary().starts_with("telegram-api-client-"));
+    }
+}
+
+/// Byte-level `memchr`-style search, so the property tests can assert on the
+/// raw wire format without depending on a parser.
+fn position(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    if needle.is_empty() {
+        return Some(0);
+    }
+    haystack
+        .windows(needle.len())
+        .position(|window| window == needle)
+}
+
+fn count(haystack: &[u8], needle: &[u8]) -> usize {
+    if needle.is_empty() {
+        return 0;
+    }
+    haystack
+        .windows(needle.len())
+        .filter(|window| *window == needle)
+        .count()
 }

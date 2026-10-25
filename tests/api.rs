@@ -65,10 +65,10 @@ fn assert_call(transport: &MockTransport, method: &str, body: Value) {
 
 #[tokio::test]
 async fn send_message_variants() {
-    // Legacy convenience call posts the minimal body.
+    // Typed one-liner posts the minimal body.
     let transport = MockTransport::new();
     let client = TelegramClient::new(TOKEN, transport.clone()).with_base_url("https://tg.test");
-    client.send_message(CHAT, "Hallo").await.unwrap();
+    client.send_text(CHAT, "Hallo").await.unwrap();
     assert_call(
         &transport,
         "sendMessage",
@@ -586,6 +586,28 @@ async fn get_me_both_flavours() {
 
     let transport = MockTransport::new();
     let client = TelegramClient::new(TOKEN, transport.clone());
-    client.get_me().await.unwrap();
+    client.me().await.unwrap();
     assert_eq!(only_call(&transport).method(), "getMe");
+}
+
+/// The two raw-`Value` 0.1 convenience methods keep working, deprecated but
+/// unchanged, so an existing caller's signature still compiles.
+#[tokio::test]
+#[allow(deprecated)]
+async fn legacy_raw_methods_keep_their_signatures() {
+    let transport = MockTransport::new();
+    let client = TelegramClient::new(TOKEN, transport.clone()).with_base_url("https://tg.test");
+
+    let envelope: Value = client.send_message(CHAT, "Hallo").await.unwrap();
+    assert_eq!(envelope["ok"], true);
+    assert_call(
+        &transport,
+        "sendMessage",
+        json!({"chat_id": CHAT, "text": "Hallo"}),
+    );
+
+    transport.push(MockReply::result(json!({"id": 3, "is_bot": true})));
+    let me: Value = client.get_me().await.unwrap();
+    assert_eq!(me["result"]["id"], 3);
+    assert_eq!(transport.calls().len(), 2);
 }

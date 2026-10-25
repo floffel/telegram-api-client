@@ -73,7 +73,7 @@ async fn shared_transport_is_not_corrupted_by_parallel_writes() {
     for index in 1..=16 {
         let client = client.clone();
         handles.push(tokio::spawn(async move {
-            client.send_message(index, &format!("body-{index}")).await
+            client.send_text(index, format!("body-{index}")).await
         }));
     }
     for handle in handles {

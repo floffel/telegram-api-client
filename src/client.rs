@@ -3,6 +3,9 @@
 //! Every method validates its request locally, posts it through the
 //! [`Transport`], and decodes the `result` field into a typed value.
 
+use std::sync::Arc;
+use std::time::Duration;
+
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use serde_json::json;
@@ -13,17 +16,19 @@ use crate::chat::{
     UnpinChatMessage,
 };
 use crate::edit::{
-    CopyMessage, DeleteMessage, EditMessageCaption, EditMessageReplyMarkup, EditMessageText,
-    EditResult, ForwardMessage, MessageId,
+    CopyMessage, DeleteMessage, EditMessageCaption, EditMessageMedia, EditMessageReplyMarkup,
+    EditMessageText, EditResult, ForwardMessage, MessageId,
 };
 use crate::error::{Error, Result};
 use crate::file::{File, GetFile};
 use crate::polling::GetUpdates;
+use crate::retry::{RetryPolicy, Sleeper, ThreadSleeper};
 use crate::send::{
     SendAnimation, SendAudio, SendContact, SendDice, SendDocument, SendLocation, SendMediaGroup,
     SendMessage, SendPhoto, SendPoll, SendVenue, SendVideo, SendVoice,
 };
-use crate::transport::Transport;
+use crate::transport::{MultipartForm, Transport};
+use crate::types::ChatId;
 use crate::update::User;
 use crate::update::{Chat, Message, Update};
 use crate::webhook_api::{DeleteWebhook, SetWebhook, WebhookInfo};
@@ -66,6 +71,57 @@ macro_rules! api_method {
     };
 }
 
+/// Like [`api_method`], but the request may carry a file to upload.
+macro_rules! media_method {
+    (
+        $(#[$meta:meta])*
+        $name:ident, $method:literal, $request:ty, $response:ty
+    ) => {
+        $(#[$meta])*
+        ///
+        /// A configured upload turns the request into a `multipart/form-data`
+        /// body; without one the same method posts JSON.
+        ///
+        /// # Errors
+        ///
+        /// [`Error::InvalidRequest`] when the request or the file does not
+        /// validate, plus transport, rate-limit and decoding failures. A 5xx is
+        /// reported as [`Error::Ambiguous`] and never retried — the upload may
+        /// have been accepted.
+        pub async fn $name(&self, request: &$request) -> Result<$response> {
+            request.validate()?;
+            let form = request.multipart_form();
+            let response = self.call_maybe_upload($method, request, form).await?;
+            take_result($method, &response)
+        }
+    };
+}
+
+/// How a request is put on the wire.
+enum Payload<'a> {
+    /// A JSON body.
+    Json(serde_json::Value),
+    /// A multipart body.
+    Multipart(&'a MultipartForm),
+}
+
+/// Retry budget and the clock to wait on.
+struct RetrySettings {
+    policy: RetryPolicy,
+    sleeper: Arc<dyn Sleeper>,
+}
+
+impl Default for RetrySettings {
+    fn default() -> Self {
+        Self {
+            // Deliberately short: automatic retries only ever cover 429 and
+            // pre-write connection failures, both of which resolve quickly.
+            policy: RetryPolicy::new(3, Duration::from_millis(500), Duration::from_secs(30)),
+            sleeper: Arc::new(ThreadSleeper),
+        }
+    }
+}
+
 /// Client bound to one bot token.
 ///
 /// Cheap to clone (when the transport is) and safe to share across tasks.
@@ -82,6 +138,7 @@ pub struct TelegramClient<T: Transport> {
     token: String,
     base_url: String,
     transport: T,
+    retry: RetrySettings,
 }
 
 impl<T: Transport + Clone> Clone for TelegramClient<T> {
@@ -90,6 +147,10 @@ impl<T: Transport + Clone> Clone for TelegramClient<T> {
             token: self.token.clone(),
             base_url: self.base_url.clone(),
             transport: self.transport.clone(),
+            retry: RetrySettings {
+                policy: self.retry.policy.clone(),
+                sleeper: Arc::clone(&self.retry.sleeper),
+            },
         }
     }
 }
@@ -100,7 +161,7 @@ impl<T: Transport> TelegramClient<T> {
     /// An empty token is rejected by the Bot API, not here — the first call
     /// will fail with [`Error::Api`].
     ///
-    /// ```
+    /// ```rust
     /// use telegram_api_client::{MockTransport, TelegramClient};
     ///
     /// let client = TelegramClient::new("123:ABC", MockTransport::new());
@@ -111,7 +172,64 @@ impl<T: Transport> TelegramClient<T> {
             token: token.into(),
             base_url: "https://api.telegram.org".to_string(),
             transport,
+            retry: RetrySettings::default(),
         }
+    }
+
+    /// Replaces the retry budget.
+    ///
+    /// The budget only ever applies to failures that are safe to repeat: a 429
+    /// (honouring `retry_after`) and a connection failure before the request was
+    /// written. A 5xx on a state-changing method is
+    /// [`Error::Ambiguous`] and is returned immediately, whatever the budget.
+    ///
+    /// ```rust
+    /// use std::time::Duration;
+    /// use telegram_api_client::{MockTransport, RetryPolicy, TelegramClient};
+    ///
+    /// let client = TelegramClient::new("123:ABC", MockTransport::new())
+    ///     .with_retry_policy(RetryPolicy::new(1, Duration::from_millis(10), Duration::from_secs(1)));
+    /// assert_eq!(client.retry_policy().max_attempts, 1, "no automatic retry");
+    /// ```
+    #[must_use]
+    pub fn with_retry_policy(mut self, policy: RetryPolicy) -> Self {
+        self.retry.policy = policy;
+        self
+    }
+
+    /// Disables automatic retries; the caller keeps the loop.
+    ///
+    /// ```rust
+    /// use telegram_api_client::{MockTransport, TelegramClient};
+    ///
+    /// let client = TelegramClient::new("123:ABC", MockTransport::new()).without_retry();
+    /// assert_eq!(client.retry_policy().max_attempts, 1);
+    /// ```
+    #[must_use]
+    pub fn without_retry(mut self) -> Self {
+        self.retry.policy.max_attempts = 1;
+        self
+    }
+
+    /// Installs a different [`Sleeper`] — a runtime timer, or a recorder that
+    /// skips the wait in tests.
+    ///
+    /// ```rust
+    /// use telegram_api_client::{MockTransport, NoDelay, TelegramClient};
+    ///
+    /// let client = TelegramClient::new("123:ABC", MockTransport::new()).with_sleeper(NoDelay);
+    /// # let _ = client;
+    /// ```
+    #[must_use]
+    pub fn with_sleeper(mut self, sleeper: impl Sleeper + 'static) -> Self {
+        self.retry.sleeper = Arc::new(sleeper);
+        self
+    }
+
+    /// The effective retry budget.
+    #[must_use]
+    pub fn retry_policy(&self) -> &RetryPolicy {
+        &self.retry.policy
     }
 
     /// Overrides the base URL (tests, proxies).
@@ -200,36 +318,108 @@ impl<T: Transport> TelegramClient<T> {
             message: format!("cannot serialize {method} body: {error}"),
             source: Some(error),
         })?;
-        self.transport
-            .post_json(&self.method_url(method), &body)
-            .await
+        self.post(method, &Payload::Json(body)).await
+    }
+
+    /// Posts either a JSON or a multipart payload, retrying only what is safe.
+    async fn call_maybe_upload<R: Serialize + ?Sized>(
+        &self,
+        method: &str,
+        request: &R,
+        form: Option<MultipartForm>,
+    ) -> Result<serde_json::Value> {
+        match form {
+            Some(form) => self.post(method, &Payload::Multipart(&form)).await,
+            None => self.call(method, request).await,
+        }
+    }
+
+    /// The one place that decides whether a failure may be repeated.
+    ///
+    /// Every error is classified for its method first, so a 5xx on a send turns
+    /// into [`Error::Ambiguous`] before the retry decision is taken. That is what
+    /// keeps a non-idempotent request from ever being retried after a 5xx.
+    async fn post(&self, method: &str, payload: &Payload<'_>) -> Result<serde_json::Value> {
+        let url = self.method_url(method);
+        let mut attempt = 0_u32;
+        loop {
+            attempt += 1;
+            let outcome = match payload {
+                Payload::Json(body) => self.transport.post_json(&url, body).await,
+                Payload::Multipart(form) => self.transport.post_multipart(&url, form).await,
+            }
+            .map_err(|error| error.classify_for(method));
+
+            match outcome {
+                Ok(response) => return Ok(response),
+                Err(error) if self.retry.policy.should_retry(attempt, &error) => {
+                    let delay = self.retry.policy.delay_for_error(attempt, &error);
+                    self.retry.sleeper.sleep(delay).await;
+                }
+                Err(error) => return Err(error),
+            }
+        }
     }
 
     // ---- messages -------------------------------------------------------
 
     /// Sends a plain text message and returns the raw response envelope.
     ///
-    /// Prefer [`Self::send_message_request`] unless you need the untouched
-    /// envelope.
+    /// Deprecated: [`Self::send_text`] returns the typed [`Message`] and
+    /// [`Self::send_message_request`] exposes the full request surface.
     ///
     /// # Errors
     ///
     /// Propagates transport and Bot API errors.
     ///
-    /// ```
+    /// ```rust
     /// use telegram_api_client::{MockTransport, TelegramClient};
     ///
     /// # async fn demo() -> telegram_api_client::Result<()> {
     /// let transport = MockTransport::new();
     /// let client = TelegramClient::new("123:ABC", transport.clone());
+    /// # #[allow(deprecated)]
     /// client.send_message(-1001, "Hallo").await?;
     /// assert_eq!(transport.last_call().unwrap().body["chat_id"], serde_json::json!(-1001));
     /// # Ok(()) }
     /// ```
+    #[deprecated(
+        since = "0.1.1",
+        note = "use `send_text` for a typed Message, or `send_message_request(&SendMessage)`"
+    )]
     pub async fn send_message(&self, chat_id: i64, text: &str) -> Result<serde_json::Value> {
         let payload = json!({ "chat_id": chat_id, "text": text });
-        self.transport
-            .post_json(&self.method_url("sendMessage"), &payload)
+        self.post("sendMessage", &Payload::Json(payload)).await
+    }
+
+    /// Sends plain text and returns the created [`Message`].
+    ///
+    /// The typed replacement for the deprecated `send_message`: one call, one
+    /// message back, no raw JSON to walk.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidRequest`] for an empty or over-long text, plus transport,
+    /// rate-limit and decoding failures.
+    ///
+    /// ```rust
+    /// use telegram_api_client::{MockTransport, TelegramClient};
+    ///
+    /// # async fn demo() -> telegram_api_client::Result<()> {
+    /// let transport = MockTransport::new();
+    /// let client = TelegramClient::new("123:ABC", transport.clone());
+    /// let message = client.send_text(-1001, "ping").await?;
+    ///
+    /// assert_eq!(message.message_id, 0);
+    /// assert_eq!(transport.last_call().unwrap().method(), "sendMessage");
+    /// # Ok(()) }
+    /// ```
+    pub async fn send_text(
+        &self,
+        chat_id: impl Into<ChatId>,
+        text: impl Into<String>,
+    ) -> Result<Message> {
+        self.send_message_request(&SendMessage::new(chat_id, text))
             .await
     }
 
@@ -251,7 +441,7 @@ impl<T: Transport> TelegramClient<T> {
         send_message_request, "sendMessage", SendMessage, Message
     );
 
-    api_method!(
+    media_method!(
         /// Sends a photo.
         ///
         /// ```
@@ -265,7 +455,7 @@ impl<T: Transport> TelegramClient<T> {
         send_photo, "sendPhoto", SendPhoto, Message
     );
 
-    api_method!(
+    media_method!(
         /// Sends a document.
         ///
         /// ```
@@ -279,7 +469,7 @@ impl<T: Transport> TelegramClient<T> {
         send_document, "sendDocument", SendDocument, Message
     );
 
-    api_method!(
+    media_method!(
         /// Sends an audio file.
         ///
         /// ```
@@ -293,7 +483,7 @@ impl<T: Transport> TelegramClient<T> {
         send_audio, "sendAudio", SendAudio, Message
     );
 
-    api_method!(
+    media_method!(
         /// Sends a video.
         ///
         /// ```
@@ -307,7 +497,7 @@ impl<T: Transport> TelegramClient<T> {
         send_video, "sendVideo", SendVideo, Message
     );
 
-    api_method!(
+    media_method!(
         /// Sends an animation.
         ///
         /// ```
@@ -321,7 +511,7 @@ impl<T: Transport> TelegramClient<T> {
         send_animation, "sendAnimation", SendAnimation, Message
     );
 
-    api_method!(
+    media_method!(
         /// Sends a voice note.
         ///
         /// ```
@@ -335,7 +525,7 @@ impl<T: Transport> TelegramClient<T> {
         send_voice, "sendVoice", SendVoice, Message
     );
 
-    api_method!(
+    media_method!(
         /// Sends an album of 2–10 media items.
         ///
         /// ```
@@ -463,6 +653,21 @@ impl<T: Transport> TelegramClient<T> {
         /// # Ok(()) }
         /// ```
         edit_message_reply_markup, "editMessageReplyMarkup", EditMessageReplyMarkup, EditResult
+    );
+
+    media_method!(
+        /// Replaces the media of an existing message.
+        ///
+        /// ```rust
+        /// use telegram_api_client::{EditMessageMedia, InputMedia, MockTransport, TelegramClient};
+        ///
+        /// # async fn demo() -> telegram_api_client::Result<()> {
+        /// let client = TelegramClient::new("123:ABC", MockTransport::new());
+        /// let edit = EditMessageMedia::new(1, 7, InputMedia::video("DQACAgI"));
+        /// client.edit_message_media(&edit).await?;
+        /// # Ok(()) }
+        /// ```
+        edit_message_media, "editMessageMedia", EditMessageMedia, EditResult
     );
 
     api_method!(
@@ -734,22 +939,24 @@ impl<T: Transport> TelegramClient<T> {
 
     /// Fetches bot identity — the cheapest call to validate a token.
     ///
+    /// Deprecated: [`Self::me`] returns the typed [`User`].
+    ///
     /// # Errors
     ///
     /// Propagates transport and Bot API errors.
     ///
-    /// ```
+    /// ```rust
     /// use telegram_api_client::{MockTransport, TelegramClient};
     ///
     /// # async fn demo() -> telegram_api_client::Result<()> {
     /// let client = TelegramClient::new("123:ABC", MockTransport::new());
+    /// # #[allow(deprecated)]
     /// client.get_me().await?;
     /// # Ok(()) }
     /// ```
+    #[deprecated(since = "0.1.1", note = "use `me` for a typed User")]
     pub async fn get_me(&self) -> Result<serde_json::Value> {
-        self.transport
-            .post_json(&self.method_url("getMe"), &json!({}))
-            .await
+        self.post("getMe", &Payload::Json(json!({}))).await
     }
 
     /// Like [`Self::get_me`], but typed.

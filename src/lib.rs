@@ -49,21 +49,21 @@ pub use chat::{
 };
 pub use client::TelegramClient;
 pub use edit::{
-    CopyMessage, DeleteMessage, EditMessageCaption, EditMessageReplyMarkup, EditMessageText,
-    EditResult, EditTarget, ForwardMessage, MessageId,
+    CopyMessage, DeleteMessage, EditMessageCaption, EditMessageMedia, EditMessageReplyMarkup,
+    EditMessageText, EditResult, EditTarget, ForwardMessage, MessageId,
 };
 pub use error::{parse_retry_after, Error, Result};
 pub use file::{File, GetFile};
 pub use polling::{GetUpdates, UpdateCursor};
-pub use retry::RetryPolicy;
+pub use retry::{is_idempotent, NoDelay, RetryPolicy, Sleeper, ThreadSleeper};
 pub use send::{
-    DeliveryOptions, MediaOptions, MessageOptions, SendAnimation, SendAudio, SendContact, SendDice,
-    SendDocument, SendLocation, SendMediaGroup, SendMessage, SendPhoto, SendPoll, SendVenue,
-    SendVideo, SendVoice,
+    guess_mime, is_valid_mime, DeliveryOptions, MediaOptions, MessageOptions, SendAnimation,
+    SendAudio, SendContact, SendDice, SendDocument, SendLocation, SendMediaGroup, SendMessage,
+    SendPhoto, SendPoll, SendVenue, SendVideo, SendVoice, UploadFile, MAX_UPLOAD_BYTES,
 };
 #[cfg(feature = "http")]
 pub use transport::ReqwestTransport;
-pub use transport::{Call, MockReply, MockTransport, Transport};
+pub use transport::{Call, MockReply, MockTransport, MultipartFile, MultipartForm, Transport};
 pub use types::{
     ChatAction, ChatId, ChatMemberStatus, ChatType, EntityKind, ForceReply, InlineKeyboardButton,
     InlineKeyboardMarkup, InputMedia, InputMediaKind, KeyboardButton, LinkPreviewOptions,

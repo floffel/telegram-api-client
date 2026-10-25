@@ -13,9 +13,14 @@ use telegram_api_client::{
 
 const CHAT: i64 = -1001;
 
+/// A client that never retries, so error semantics can be asserted on exactly
+/// one reply. Automatic retry has its own test file.
 fn client() -> (TelegramClient<MockTransport>, MockTransport) {
     let transport = MockTransport::new();
-    (TelegramClient::new("123:ABC", transport.clone()), transport)
+    (
+        TelegramClient::new("123:ABC", transport.clone()).without_retry(),
+        transport,
+    )
 }
 
 /// Asserts the error is an `InvalidRequest` on `field`.
@@ -471,7 +476,7 @@ async fn rate_limit_with_parameters_is_typed_and_retryable() {
         "parameters": { "retry_after": 5 }
     })));
 
-    let error = client.get_me().await.unwrap_err();
+    let error = client.me().await.unwrap_err();
     assert!(error.is_retryable());
     assert_eq!(error.retry_after(), Some(std::time::Duration::from_secs(5)));
     assert!(matches!(error, Error::RateLimited { code: 429, .. }));
@@ -501,7 +506,7 @@ async fn rate_limit_without_a_hint_is_still_retryable() {
         "error_code": 429,
         "description": "Too Many Requests"
     })));
-    let error = client.get_me().await.unwrap_err();
+    let error = client.me().await.unwrap_err();
     assert_eq!(error.retry_after(), None);
     assert!(error.is_retryable());
 }

@@ -2,12 +2,17 @@
 //!
 //! Every struct serializes to the exact JSON the Bot API expects (`snake_case`,
 //! absent optional fields omitted) and validates what can be validated without
-//! the network. Media is referenced by `file_id` or HTTP URL — see the README
-//! for why multipart upload is out of scope.
+//! the network. Media can be referenced by `file_id` or HTTP URL, or uploaded
+//! from memory or disk with [`UploadFile`]; an upload turns the request into a
+//! `multipart/form-data` body.
+
+use std::path::Path;
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use crate::error::{Error, Result};
+use crate::transport::{MultipartFile, MultipartForm};
 use crate::types::{
     ChatId, InputMedia, LinkPreviewOptions, MessageEntity, ParseMode, PollType, ReplyMarkup,
 };
@@ -28,6 +33,13 @@ pub const MIN_POLL_OPTIONS: usize = 2;
 pub const MAX_MEDIA_GROUP: usize = 10;
 /// Fewest items a media group may contain.
 pub const MIN_MEDIA_GROUP: usize = 2;
+/// Most bytes the Bot API accepts for a single upload (50 MB).
+///
+/// Checked before the request is built, so an oversized file is rejected
+/// without allocating a body or opening a socket.
+pub const MAX_UPLOAD_BYTES: usize = 50 * 1024 * 1024;
+/// Longest accepted file name, in bytes.
+pub const MAX_FILENAME_BYTES: usize = 255;
 
 /// Rejects empty and over-long text, counting UTF-16 code units like Telegram.
 pub(crate) fn validate_text(field: &'static str, value: &str, max: usize) -> Result<()> {
@@ -59,6 +71,358 @@ pub(crate) fn validate_chat(field: &'static str, chat: &ChatId) -> Result<()> {
             reason: "username must not be empty".to_string(),
         }),
         ChatId::Id(_) | ChatId::Username(_) => Ok(()),
+    }
+}
+
+/// A file to upload: bytes, a name, and the MIME type Telegram should see.
+///
+/// ```rust
+/// use telegram_api_client::UploadFile;
+///
+/// // MIME guessed from the extension, `application/octet-stream` otherwise.
+/// let png = UploadFile::new("Grüße.png", vec![0x89, b'P', b'N', b'G']);
+/// assert_eq!(png.mime, "image/png");
+/// assert_eq!(png.len(), 4);
+/// assert!(png.validate().is_ok());
+///
+/// // An explicit type wins over the guess.
+/// let odd = UploadFile::new("data.bin", vec![1]).with_mime("application/x-custom");
+/// assert_eq!(odd.mime, "application/x-custom");
+/// ```
+#[derive(Clone, PartialEq, Eq)]
+pub struct UploadFile {
+    /// Name sent in `Content-Disposition`; Unicode is kept as-is.
+    pub filename: String,
+    /// MIME type, `type/subtype`.
+    pub mime: String,
+    /// File contents.
+    pub bytes: Vec<u8>,
+}
+
+impl UploadFile {
+    /// A file from memory, with the MIME type guessed from `filename`.
+    ///
+    /// ```rust
+    /// use telegram_api_client::UploadFile;
+    ///
+    /// let audio = UploadFile::new("voice.ogg", vec![0x4f, 0x67, 0x67, 0x53]);
+    /// assert_eq!(audio.mime, "audio/ogg");
+    ///
+    /// let unknown = UploadFile::new("stuff", Vec::new());
+    /// assert_eq!(unknown.mime, "application/octet-stream");
+    /// ```
+    #[must_use]
+    pub fn new(filename: impl Into<String>, bytes: Vec<u8>) -> Self {
+        let filename = filename.into();
+        Self {
+            mime: guess_mime(&filename).to_string(),
+            filename,
+            bytes,
+        }
+    }
+
+    /// Reads a file from disk, rejecting an oversized file before allocating.
+    ///
+    /// The file name (not the whole path) is sent to Telegram.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidRequest`] when the file cannot be read or is larger than
+    /// [`MAX_UPLOAD_BYTES`].
+    ///
+    /// ```no_run
+    /// use telegram_api_client::UploadFile;
+    ///
+    /// # fn demo() -> telegram_api_client::Result<()> {
+    /// let photo = UploadFile::from_path("photo.png")?;
+    /// assert_eq!(photo.filename, "photo.png");
+    /// assert_eq!(photo.mime, "image/png");
+    /// # Ok(()) }
+    /// ```
+    pub fn from_path(path: impl AsRef<Path>) -> Result<Self> {
+        let path = path.as_ref();
+        let metadata = std::fs::metadata(path).map_err(|error| Error::InvalidRequest {
+            field: "file",
+            reason: format!("cannot read {}: {error}", path.display()),
+        })?;
+        if metadata.len() > MAX_UPLOAD_BYTES as u64 {
+            return Err(Error::InvalidRequest {
+                field: "file",
+                reason: format!(
+                    "{MAX_UPLOAD_BYTES} bytes is the upload limit, {} has {}",
+                    path.display(),
+                    metadata.len()
+                ),
+            });
+        }
+        let bytes = std::fs::read(path).map_err(|error| Error::InvalidRequest {
+            field: "file",
+            reason: format!("cannot read {}: {error}", path.display()),
+        })?;
+        let filename = path
+            .file_name()
+            .map_or_else(String::new, |name| name.to_string_lossy().into_owned());
+        Ok(Self::new(filename, bytes))
+    }
+
+    /// Overrides the MIME type.
+    ///
+    /// ```rust
+    /// use telegram_api_client::UploadFile;
+    ///
+    /// let file = UploadFile::new("blob", vec![1]).with_mime("image/png");
+    /// assert_eq!(file.mime, "image/png");
+    /// ```
+    #[must_use]
+    pub fn with_mime(mut self, mime: impl Into<String>) -> Self {
+        self.mime = mime.into();
+        self
+    }
+
+    /// Number of bytes to upload.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.bytes.len()
+    }
+
+    /// Whether the buffer is empty. Telegram rejects empty files.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.bytes.is_empty()
+    }
+
+    /// Checks name, MIME type and size.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidRequest`] for an empty or unusable file name, a MIME type
+    /// that is not `type/subtype`, an empty payload, or a payload over
+    /// [`MAX_UPLOAD_BYTES`].
+    ///
+    /// ```rust
+    /// use telegram_api_client::{Error, UploadFile};
+    ///
+    /// let empty = UploadFile::new("a.png", Vec::new());
+    /// assert!(matches!(empty.validate(), Err(Error::InvalidRequest { field: "file", .. })));
+    ///
+    /// let bad_mime = UploadFile::new("a.png", vec![1]).with_mime("png");
+    /// assert!(matches!(bad_mime.validate(), Err(Error::InvalidRequest { field: "mime", .. })));
+    ///
+    /// let injection = UploadFile::new("a\"\r\nX-Evil: 1.png", vec![1]);
+    /// assert!(injection.validate().is_err());
+    /// ```
+    pub fn validate(&self) -> Result<()> {
+        validate_filename(&self.filename)?;
+        if !is_valid_mime(&self.mime) {
+            return Err(Error::InvalidRequest {
+                field: "mime",
+                reason: format!("`{}` is not a type/subtype MIME type", self.mime),
+            });
+        }
+        if self.bytes.is_empty() {
+            return Err(Error::InvalidRequest {
+                field: "file",
+                reason: "must not be empty".to_string(),
+            });
+        }
+        if self.bytes.len() > MAX_UPLOAD_BYTES {
+            return Err(Error::InvalidRequest {
+                field: "file",
+                reason: format!(
+                    "must be at most {MAX_UPLOAD_BYTES} bytes, got {}",
+                    self.bytes.len()
+                ),
+            });
+        }
+        Ok(())
+    }
+
+    /// Checks the file and that its MIME type belongs to one of `families`.
+    ///
+    /// An empty `families` slice accepts any type — right for `sendDocument`,
+    /// which carries arbitrary files.
+    ///
+    /// # Errors
+    ///
+    /// Everything [`Self::validate`] rejects, plus a MIME type outside the
+    /// accepted families (an `application/pdf` sent as `sendPhoto`, say).
+    ///
+    /// ```rust
+    /// use telegram_api_client::UploadFile;
+    ///
+    /// let pdf = UploadFile::new("a.pdf", vec![1]);
+    /// assert!(pdf.validate_for("photo", &["image/"]).is_err());
+    /// assert!(pdf.validate_for("document", &[]).is_ok());
+    ///
+    /// let png = UploadFile::new("a.png", vec![1]);
+    /// assert!(png.validate_for("photo", &["image/"]).is_ok());
+    /// ```
+    pub fn validate_for(&self, field: &'static str, families: &[&str]) -> Result<()> {
+        self.validate()?;
+        if families.is_empty() || families.iter().any(|family| self.mime.starts_with(family)) {
+            return Ok(());
+        }
+        Err(Error::InvalidRequest {
+            field,
+            reason: format!(
+                "`{}` cannot be used here; expected a file of type {}",
+                self.mime,
+                families.join(" or ")
+            ),
+        })
+    }
+
+    /// Converts to the transport-level part named `field`.
+    ///
+    /// ```rust
+    /// use telegram_api_client::UploadFile;
+    ///
+    /// let part = UploadFile::new("a.png", vec![1, 2]).to_part("photo");
+    /// assert_eq!(part.field, "photo");
+    /// assert_eq!(part.mime, "image/png");
+    /// ```
+    #[must_use]
+    pub fn to_part(&self, field: &str) -> MultipartFile {
+        MultipartFile::new(
+            field,
+            self.filename.clone(),
+            self.mime.clone(),
+            self.bytes.clone(),
+        )
+    }
+}
+
+/// Byte counts are noisy in `Debug`; the length is what matters when a test
+/// fails on a mismatch.
+impl std::fmt::Debug for UploadFile {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("UploadFile")
+            .field("filename", &self.filename)
+            .field("mime", &self.mime)
+            .field("bytes", &format_args!("{} bytes", self.bytes.len()))
+            .finish()
+    }
+}
+
+/// Rejects file names that would break out of a `Content-Disposition` header.
+fn validate_filename(filename: &str) -> Result<()> {
+    if filename.trim().is_empty() {
+        return Err(Error::InvalidRequest {
+            field: "file",
+            reason: "file name must not be empty".to_string(),
+        });
+    }
+    if filename.len() > MAX_FILENAME_BYTES {
+        return Err(Error::InvalidRequest {
+            field: "file",
+            reason: format!("file name must be at most {MAX_FILENAME_BYTES} bytes"),
+        });
+    }
+    if filename
+        .chars()
+        .any(|c| c.is_control() || c == '"' || c == '\\')
+    {
+        return Err(Error::InvalidRequest {
+            field: "file",
+            reason: "file name must not contain control characters, quotes or backslashes"
+                .to_string(),
+        });
+    }
+    Ok(())
+}
+
+/// Whether `mime` looks like a `type/subtype` pair of RFC 6838 tokens.
+///
+/// ```rust
+/// use telegram_api_client::is_valid_mime;
+///
+/// assert!(is_valid_mime("image/png"));
+/// assert!(is_valid_mime("application/vnd.api+json"));
+/// assert!(!is_valid_mime("png"));
+/// assert!(!is_valid_mime("image/"));
+/// assert!(!is_valid_mime("image/png/extra"));
+/// assert!(!is_valid_mime("image/p ng"));
+/// ```
+#[must_use]
+pub fn is_valid_mime(mime: &str) -> bool {
+    let mut parts = mime.split('/');
+    let (Some(kind), Some(subtype), None) = (parts.next(), parts.next(), parts.next()) else {
+        return false;
+    };
+    !kind.is_empty()
+        && !subtype.is_empty()
+        && kind.chars().all(is_token_char)
+        && subtype.chars().all(is_token_char)
+}
+
+/// RFC 6838 token characters.
+fn is_token_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || "!#$%&'*+-.^_`|~".contains(c)
+}
+
+/// Guesses a MIME type from a file name's extension.
+///
+/// Unknown or missing extensions fall back to `application/octet-stream`.
+///
+/// ```rust
+/// use telegram_api_client::guess_mime;
+///
+/// assert_eq!(guess_mime("photo.JPG"), "image/jpeg");
+/// assert_eq!(guess_mime("clip.mp4"), "video/mp4");
+/// assert_eq!(guess_mime("archive.tar.gz"), "application/gzip");
+/// assert_eq!(guess_mime("Makefile"), "application/octet-stream");
+/// ```
+#[must_use]
+pub fn guess_mime(filename: &str) -> &'static str {
+    let extension = filename
+        .rsplit_once('.')
+        .map(|(_, extension)| extension.to_ascii_lowercase());
+    match extension.as_deref() {
+        Some("png") => "image/png",
+        Some("jpg" | "jpeg") => "image/jpeg",
+        Some("gif") => "image/gif",
+        Some("webp") => "image/webp",
+        Some("heic") => "image/heic",
+        Some("tgs") => "application/x-tgsticker",
+        Some("webm") => "video/webm",
+        Some("mp4") => "video/mp4",
+        Some("mov") => "video/quicktime",
+        Some("m4v") => "video/x-m4v",
+        Some("mp3") => "audio/mpeg",
+        Some("m4a") => "audio/mp4",
+        Some("ogg" | "oga" | "opus") => "audio/ogg",
+        Some("wav") => "audio/wav",
+        Some("flac") => "audio/flac",
+        Some("pdf") => "application/pdf",
+        Some("zip") => "application/zip",
+        Some("gz") => "application/gzip",
+        Some("json") => "application/json",
+        Some("csv") => "text/csv",
+        Some("txt" | "md") => "text/plain",
+        _ => "application/octet-stream",
+    }
+}
+
+/// Converts a serialized request into a multipart form, dropping the reference
+/// field that the file part replaces.
+pub(crate) fn form_with_file(body: Value, param: &str, file: &UploadFile) -> MultipartForm {
+    let mut form = MultipartForm::new();
+    if let Value::Object(map) = body {
+        for (key, value) in map {
+            if key == param {
+                continue;
+            }
+            form = form.field(key, text_field(&value));
+        }
+    }
+    form.with_file(file.to_part(param))
+}
+
+/// Renders a JSON value as the string a multipart field carries.
+pub(crate) fn text_field(value: &Value) -> String {
+    match value {
+        Value::String(text) => text.clone(),
+        other => other.to_string(),
     }
 }
 
@@ -374,6 +738,7 @@ macro_rules! media_send {
             pub $field:ident: String,
         }
         $doc:literal
+        accepts: $families:expr
     ) => {
         $(#[$meta])*
         #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq)]
@@ -382,6 +747,12 @@ macro_rules! media_send {
             pub chat_id: ChatId,
             $(#[$fmeta])*
             pub $field: String,
+            /// Bytes to upload instead of referencing the media remotely.
+            ///
+            /// Skipped on the wire: an upload turns the whole request into a
+            /// `multipart/form-data` body.
+            #[serde(skip)]
+            pub upload: Option<UploadFile>,
             /// Caption and delivery flags.
             #[serde(flatten)]
             pub options: MediaOptions,
@@ -394,6 +765,7 @@ macro_rules! media_send {
                 Self {
                     chat_id: chat_id.into(),
                     $field: $field.into(),
+                    upload: None,
                     options: MediaOptions::default(),
                 }
             }
@@ -433,12 +805,57 @@ macro_rules! media_send {
                 self
             }
 
-            /// Checks chat, media reference and caption.
+            /// Uploads local bytes instead of referencing a `file_id` or URL.
+            ///
+            /// The file becomes a multipart part named after the Bot API
+            /// parameter, and the reference field is rewritten to the matching
+            /// `attach://` placeholder.
+            #[doc = concat!(
+                "```\n",
+                "use telegram_api_client::{", stringify!($name), ", UploadFile};\n",
+                "\n",
+                "let request = ", stringify!($name), "::new(1, \"file-id\")\n",
+                "    .with_upload(UploadFile::new(\"a.bin\", vec![1, 2, 3]));\n",
+                "let form = request.multipart_form().unwrap();\n",
+                "assert_eq!(form.files()[0].field, \"", stringify!($field), "\");\n",
+                "```\n",
+            )]
+            #[must_use]
+            pub fn with_upload(mut self, upload: UploadFile) -> Self {
+                self.upload = Some(upload);
+                self.$field = format!("attach://{}", stringify!($field));
+                self
+            }
+
+            /// The multipart body for this request, or `None` when no upload was
+            /// configured and the request is plain JSON.
+            ///
+            /// ```no_run
+            /// # use telegram_api_client::UploadFile;
+            /// # use telegram_api_client::SendPhoto;
+            /// # fn demo() {
+            /// let upload = UploadFile::from_path("photo.png").unwrap();
+            /// let request = SendPhoto::new(1, "ignored").with_upload(upload);
+            /// assert!(request.multipart_form().is_some());
+            ///
+            /// let json_only = SendPhoto::new(1, "AgACAgI");
+            /// assert!(json_only.multipart_form().is_none());
+            /// # }
+            /// ```
+            #[must_use]
+            pub fn multipart_form(&self) -> Option<MultipartForm> {
+                let upload = self.upload.as_ref()?;
+                let body = serde_json::to_value(self).ok()?;
+                Some(form_with_file(body, stringify!($field), upload))
+            }
+
+            /// Checks chat, media reference or upload, and caption.
             ///
             /// # Errors
             ///
             /// [`Error::InvalidRequest`] for an unusable chat, an empty media
-            /// reference, or a caption that is empty or too long.
+            /// reference, an upload that is empty, too large, misnamed or of the
+            /// wrong MIME family, or a caption that is empty or too long.
             pub fn validate(&self) -> Result<()> {
                 validate_chat("chat_id", &self.chat_id)?;
                 if self.$field.trim().is_empty() {
@@ -446,6 +863,9 @@ macro_rules! media_send {
                         field: stringify!($field),
                         reason: "must not be empty".to_string(),
                     });
+                }
+                if let Some(upload) = &self.upload {
+                    upload.validate_for(stringify!($field), $families)?;
                 }
                 self.options.validate()
             }
@@ -469,6 +889,7 @@ media_send! {
         pub photo: String,
     }
     "A photo, referenced by `file_id` or URL."
+    accepts: &["image/"]
 }
 
 media_send! {
@@ -485,6 +906,7 @@ media_send! {
         pub document: String,
     }
     "A document, referenced by `file_id` or URL."
+    accepts: &[]
 }
 
 media_send! {
@@ -501,6 +923,7 @@ media_send! {
         pub audio: String,
     }
     "An audio track, referenced by `file_id` or URL."
+    accepts: &["audio/"]
 }
 
 media_send! {
@@ -517,6 +940,7 @@ media_send! {
         pub video: String,
     }
     "A video, referenced by `file_id` or URL."
+    accepts: &["video/"]
 }
 
 media_send! {
@@ -533,6 +957,7 @@ media_send! {
         pub animation: String,
     }
     "An animation (GIF or soundless MP4), referenced by `file_id` or URL."
+    accepts: &["image/", "video/"]
 }
 
 media_send! {
@@ -549,6 +974,7 @@ media_send! {
         pub voice: String,
     }
     "A voice note, referenced by `file_id` or URL."
+    accepts: &["audio/"]
 }
 
 /// `sendMediaGroup` body — an album of 2 to 10 items.
@@ -600,12 +1026,13 @@ impl SendMediaGroup {
         self
     }
 
-    /// Checks chat, album size and per-item captions.
+    /// Checks chat, album size, uploads and per-item captions.
     ///
     /// # Errors
     ///
     /// [`Error::InvalidRequest`] for an unusable chat, an album outside
-    /// `2..=10` items, or a caption that is empty or too long.
+    /// `2..=10` items, an upload that does not match its item kind, or a
+    /// caption that is empty or too long.
     pub fn validate(&self) -> Result<()> {
         validate_chat("chat_id", &self.chat_id)?;
         if self.media.len() < MIN_MEDIA_GROUP || self.media.len() > MAX_MEDIA_GROUP {
@@ -624,11 +1051,86 @@ impl SendMediaGroup {
                     reason: "item media reference must not be empty".to_string(),
                 });
             }
+            if let Some(upload) = &item.upload {
+                let families = item.kind.mime_families();
+                upload.validate_for("media", families)?;
+            }
             if let Some(caption) = item.caption.as_deref() {
                 validate_text("caption", caption, MAX_CAPTION)?;
             }
         }
         Ok(())
+    }
+
+    /// The multipart body for this album, or `None` when every item is
+    /// referenced by `file_id`/URL.
+    ///
+    /// Uploaded items are attached as `file0`, `file1`, … and referenced from
+    /// the `media` array as `attach://file0`, exactly as the Bot API expects.
+    ///
+    /// ```rust
+    /// use telegram_api_client::{InputMedia, SendMediaGroup, UploadFile};
+    ///
+    /// let album = SendMediaGroup::new(
+    ///     -1001,
+    ///     vec![
+    ///         InputMedia::photo("AgACAgI"),
+    ///         InputMedia::photo("ignored").with_upload(UploadFile::new("b.png", vec![1, 2])),
+    ///     ],
+    /// );
+    /// assert!(album.validate().is_ok());
+    ///
+    /// let form = album.multipart_form().unwrap();
+    /// assert_eq!(form.files().len(), 1);
+    /// assert_eq!(form.files()[0].field, "file1");
+    /// assert!(form
+    ///     .json_fields()["media"]
+    ///     .as_str()
+    ///     .unwrap()
+    ///     .contains("attach://file1"));
+    /// ```
+    #[must_use]
+    pub fn multipart_form(&self) -> Option<MultipartForm> {
+        if !self.media.iter().any(|item| item.upload.is_some()) {
+            return None;
+        }
+        let body = serde_json::to_value(self).ok()?;
+        let Value::Object(map) = body else {
+            return None;
+        };
+
+        let mut form = MultipartForm::new();
+        for (key, value) in map {
+            if key == "media" {
+                let Value::Array(items) = value else {
+                    form = form.field(key, text_field(&value));
+                    continue;
+                };
+                let mut rewritten = Vec::with_capacity(items.len());
+                for (index, item) in items.into_iter().enumerate() {
+                    let upload = self
+                        .media
+                        .get(index)
+                        .and_then(|media| media.upload.as_ref());
+                    let mut item = item;
+                    if let Some(upload) = upload {
+                        let field = format!("file{index}");
+                        if let Value::Object(ref mut object) = item {
+                            object.insert(
+                                "media".to_string(),
+                                Value::String(format!("attach://{field}")),
+                            );
+                        }
+                        form = form.with_file(upload.to_part(&field));
+                    }
+                    rewritten.push(item);
+                }
+                form = form.field(key, Value::Array(rewritten));
+                continue;
+            }
+            form = form.field(key, text_field(&value));
+        }
+        Some(form)
     }
 }
 

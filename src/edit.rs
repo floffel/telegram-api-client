@@ -1,10 +1,12 @@
 //! Editing, deleting, forwarding and copying messages.
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use crate::error::{Error, Result};
-use crate::send::{validate_chat, validate_text, MAX_CAPTION, MAX_MESSAGE_TEXT};
-use crate::types::{ChatId, LinkPreviewOptions, MessageEntity, ParseMode, ReplyMarkup};
+use crate::send::{text_field, validate_chat, validate_text, MAX_CAPTION, MAX_MESSAGE_TEXT};
+use crate::transport::MultipartForm;
+use crate::types::{ChatId, InputMedia, LinkPreviewOptions, MessageEntity, ParseMode, ReplyMarkup};
 
 /// Identifies the message an edit applies to: either `chat_id` + `message_id`,
 /// or the id of an inline message.
@@ -264,6 +266,148 @@ impl EditMessageCaption {
             None => Ok(()),
             Some(caption) => validate_text("caption", caption, MAX_CAPTION),
         }
+    }
+}
+
+/// `editMessageMedia` body: replaces the media of an existing message.
+///
+/// ```rust
+/// use telegram_api_client::{EditMessageMedia, InputMedia};
+///
+/// let edit = EditMessageMedia::new(1, 7, InputMedia::video("DQACAgI"));
+/// let json = serde_json::to_value(&edit).unwrap();
+/// assert_eq!(json["media"]["type"], "video");
+/// assert_eq!(json["message_id"], 7);
+/// ```
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq)]
+pub struct EditMessageMedia {
+    /// Message to edit.
+    #[serde(flatten)]
+    pub target: EditTarget,
+    /// Replacement media.
+    pub media: InputMedia,
+    /// Replacement keyboard.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reply_markup: Option<ReplyMarkup>,
+}
+
+impl EditMessageMedia {
+    /// Replaces the media of a message in a chat.
+    ///
+    /// ```rust
+    /// use telegram_api_client::{EditMessageMedia, InputMedia};
+    ///
+    /// let edit = EditMessageMedia::new(-1001, 7, InputMedia::photo("AgACAgI"))
+    ///     .with_caption("new picture");
+    /// assert!(edit.validate().is_ok());
+    /// ```
+    #[must_use]
+    pub fn new(chat_id: impl Into<ChatId>, message_id: i64, media: InputMedia) -> Self {
+        Self {
+            target: EditTarget::chat(chat_id, message_id),
+            media,
+            reply_markup: None,
+        }
+    }
+
+    /// Replaces the media of an inline message.
+    ///
+    /// ```rust
+    /// use telegram_api_client::{EditMessageMedia, InputMedia};
+    ///
+    /// let edit = EditMessageMedia::for_inline("inline-1", InputMedia::photo("AgACAgI"));
+    /// assert_eq!(edit.target.inline_message_id.as_deref(), Some("inline-1"));
+    /// ```
+    #[must_use]
+    pub fn for_inline(inline_message_id: impl Into<String>, media: InputMedia) -> Self {
+        Self {
+            target: EditTarget::inline(inline_message_id),
+            media,
+            reply_markup: None,
+        }
+    }
+
+    /// Adds or replaces the caption of the new media.
+    #[must_use]
+    pub fn with_caption(mut self, caption: impl Into<String>) -> Self {
+        self.media = self.media.with_caption(caption);
+        self
+    }
+
+    /// Replaces the keyboard.
+    #[must_use]
+    pub fn with_reply_markup(mut self, markup: ReplyMarkup) -> Self {
+        self.reply_markup = Some(markup);
+        self
+    }
+
+    /// Checks the target, the media reference or upload, and the caption.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidRequest`] for an invalid target, an empty media
+    /// reference, an upload that is empty, too large, misnamed or of the wrong
+    /// MIME family for the item kind, or a caption that is empty or too long.
+    pub fn validate(&self) -> Result<()> {
+        self.target.validate()?;
+        if self.media.media.trim().is_empty() {
+            return Err(Error::InvalidRequest {
+                field: "media",
+                reason: "media reference must not be empty".to_string(),
+            });
+        }
+        if let Some(upload) = &self.media.upload {
+            upload.validate_for("media", self.media.kind.mime_families())?;
+        }
+        match self.media.caption.as_deref() {
+            None => Ok(()),
+            Some(caption) => validate_text("caption", caption, MAX_CAPTION),
+        }
+    }
+
+    /// The multipart body for this edit, or `None` when the new media is
+    /// referenced by `file_id`/URL.
+    ///
+    /// ```rust
+    /// use telegram_api_client::{EditMessageMedia, InputMedia, UploadFile};
+    ///
+    /// let edit = EditMessageMedia::new(
+    ///     1,
+    ///     7,
+    ///     InputMedia::photo("ignored").with_upload(UploadFile::new("new.png", vec![1, 2])),
+    /// );
+    /// let form = edit.multipart_form().unwrap();
+    /// assert_eq!(form.files()[0].field, "file0");
+    /// assert!(form.json_fields()["media"].as_str().unwrap().contains("attach://file0"));
+    ///
+    /// let json_only = EditMessageMedia::new(1, 7, InputMedia::photo("AgACAgI"));
+    /// assert!(json_only.multipart_form().is_none());
+    /// ```
+    #[must_use]
+    pub fn multipart_form(&self) -> Option<MultipartForm> {
+        let upload = self.media.upload.as_ref()?;
+        let body = serde_json::to_value(self).ok()?;
+        let Value::Object(map) = body else {
+            return None;
+        };
+
+        let mut form = MultipartForm::new();
+        for (key, value) in map {
+            if key == "media" {
+                let Value::Object(mut object) = value else {
+                    form = form.field(key, text_field(&value));
+                    continue;
+                };
+                object.insert(
+                    "media".to_string(),
+                    Value::String("attach://file0".to_string()),
+                );
+                form = form.field(key, Value::Object(object));
+                continue;
+            }
+            form = form.field(key, text_field(&value));
+        }
+        Some(form.with_file(upload.to_part("file0")))
     }
 }
 

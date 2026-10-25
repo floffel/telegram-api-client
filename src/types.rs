@@ -304,6 +304,44 @@ string_enum! {
     }
 }
 
+impl InputMediaKind {
+    /// MIME families Telegram accepts for this kind of media.
+    ///
+    /// ```rust
+    /// use telegram_api_client::InputMediaKind;
+    ///
+    /// assert_eq!(InputMediaKind::Photo.mime_families(), ["image/"]);
+    /// assert!(InputMediaKind::Document.mime_families().is_empty());
+    /// ```
+    #[must_use]
+    pub fn mime_families(&self) -> &'static [&'static str] {
+        match self {
+            Self::Photo => &["image/"],
+            Self::Video => &["video/"],
+            Self::Animation => &["image/", "video/"],
+            Self::Audio => &["audio/"],
+            Self::Document | Self::Unknown(_) => &[],
+        }
+    }
+
+    /// Whether `mime` fits this kind of media.
+    ///
+    /// Unknown kinds accept anything: the crate does not know what they carry.
+    ///
+    /// ```rust
+    /// use telegram_api_client::InputMediaKind;
+    ///
+    /// assert!(InputMediaKind::Photo.accepts_mime("image/png"));
+    /// assert!(!InputMediaKind::Photo.accepts_mime("video/mp4"));
+    /// assert!(InputMediaKind::from("sticker").accepts_mime("image/webp"));
+    /// ```
+    #[must_use]
+    pub fn accepts_mime(&self, mime: &str) -> bool {
+        let families = self.mime_families();
+        families.is_empty() || families.iter().any(|family| mime.starts_with(family))
+    }
+}
+
 /// A chat reference: numeric id or `@username`.
 ///
 /// ```
@@ -910,6 +948,12 @@ pub struct InputMedia {
     /// Fields this crate does not model, forwarded unchanged.
     #[serde(flatten, default, skip_serializing_if = "serde_json::Map::is_empty")]
     pub extra: serde_json::Map<String, Value>,
+    /// Bytes to upload instead of referencing the media remotely.
+    ///
+    /// Skipped on the wire: the enclosing request becomes multipart and the
+    /// part is referenced as `attach://…`.
+    #[serde(skip)]
+    pub upload: Option<crate::send::UploadFile>,
 }
 
 impl InputMedia {
@@ -952,6 +996,22 @@ impl InputMedia {
     #[must_use]
     pub fn with_parse_mode(mut self, mode: ParseMode) -> Self {
         self.parse_mode = Some(mode);
+        self
+    }
+
+    /// Uploads local bytes instead of referencing a `file_id` or URL.
+    ///
+    /// ```rust
+    /// use telegram_api_client::{InputMedia, UploadFile};
+    ///
+    /// let item = InputMedia::photo("ignored").with_upload(UploadFile::new("b.png", vec![1, 2]));
+    /// assert_eq!(item.media, "attach://media");
+    /// assert_eq!(item.upload.as_ref().unwrap().len(), 2);
+    /// ```
+    #[must_use]
+    pub fn with_upload(mut self, upload: crate::send::UploadFile) -> Self {
+        self.upload = Some(upload);
+        self.media = "attach://media".to_string();
         self
     }
 }
