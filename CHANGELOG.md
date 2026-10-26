@@ -6,6 +6,34 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html); what that
 means for this API is spelled out in the README under
 [Versioning and MSRV](README.md#versioning-msrv-and-changelog).
 
+## [0.1.5] - 2026-10-26
+
+### Fixed
+
+- Photo uploads were validated against the 50 MB document budget, so a 30 MB
+  "photo" passed the pre-flight check and was rejected by the server instead of
+  by the crate. The ceiling now belongs to the operation: `sendPhoto`, a photo
+  item in `sendMediaGroup` and `editMessageMedia` carrying a photo are capped at
+  `MAX_PHOTO_BYTES` (10 MB), while documents, audio, video, animations and voice
+  notes keep `MAX_UPLOAD_BYTES` (50 MB). Quoted from the Bot API, "Sending
+  files": "10 MB max size for photos, 50 MB for other files".
+
+### Added
+
+- `UploadFile::validate_with_limit(field, families, max_bytes)`: the check the
+  request types now call, so the ceiling is an argument instead of a constant.
+  `validate()` and `validate_for()` keep the 50 MB budget and are otherwise
+  unchanged.
+- `MAX_PHOTO_URL_BYTES` (5 MB) and `MAX_FILE_URL_BYTES` (20 MB), the ceilings for
+  sending by URL, plus `MAX_DOWNLOAD_BYTES` (20 MB) and
+  `File::fits_download_limit()` for `getFile`. A URL carries no size, so the
+  crate documents these instead of pretending to enforce them.
+- `InputMediaKind::upload_limit_bytes()`, which albums and media edits use to
+  pick the ceiling of each item.
+- `tests/limits.rs`: the N/N+1 boundary per operation, per item kind and for the
+  download ceiling, with two property tests (the ceiling is inclusive, and a
+  refusal names the limit that applied).
+
 ## [0.1.4] - 2026-10-26
 
 ### Changed
