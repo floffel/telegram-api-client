@@ -180,9 +180,15 @@ message you already control, a callback id you persisted before sending, or an
 idempotency key inside the text that your consumer ignores.
 
 **Tuning.** `RetryPolicy` sets the attempt budget (default 3) and the backoff
-curve; `with_sleeper` swaps the timer. The default `ThreadSleeper` waits on a
-helper thread, so no async runtime is required — install your runtime's timer in
-production if you prefer, or `NoDelay` in tests. `without_retry()` restores "the
+curve; `with_sleeper` swaps the timer. The default `ThreadSleeper` delegates the
+wait to `futures-timer`, whose `Delay` completes on whatever executor drives it,
+with no tokio/async-std/smol feature and no runtime activation; install your own
+timer in production if you prefer, or `NoDelay` in tests. The backoff arithmetic
+stays local on purpose, and the measured comparison is in `src/retry.rs`:
+`backoff` 0.4 has had no release since 2021-12 and its `next_backoff` needs
+`&mut self`, `backon` 1.6 computes the curve in `f32` seconds, and
+`retry-policies` 0.5 answers with a `SystemTime` and carries no server hint.
+`without_retry()` restores "the
 caller owns every retry". The crate never sleeps between *your* retries and
 never hides an ambiguous outcome.
 

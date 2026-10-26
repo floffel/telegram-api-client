@@ -1,13 +1,41 @@
 //! Delivery classification, backoff decisions and the sleeper seam.
 //!
-//! Everything in this module is pure or thread-based: the crate never depends on
+//! Everything in this module is pure or timer-based: the crate never depends on
 //! a specific async runtime, and a caller can always swap the timer.
+//!
+//! # What is delegated, and what is not (issue #15)
+//!
+//! The audit asked for the backoff engine and the sleeping loop to come from
+//! maintained crates instead of being written here. The two halves get different
+//! answers, and both were measured rather than assumed.
+//!
+//! **The wait is delegated.** [`ThreadSleeper`] is built on `futures-timer`
+//! (3.0.4, released 2026-05): its `Delay` completes on whatever executor drives
+//! the future, with no tokio/async-std/smol feature and no runtime activation,
+//! which was confirmed by driving it from a bare `futures::executor::block_on`.
+//! That replaced a hand-written future with its own waker slot, an atomic flag
+//! and one spawned thread per wait.
+//!
+//! **The curve is not.** Every candidate was measured against the three things
+//! this policy has to do: exact integer delays, `retry_after` precedence and
+//! idempotency gating.
+//!
+//! * `backoff` 0.4, the crate the audit named, has had no release since
+//!   2021-12, and its `next_backoff` takes `&mut self`, so a pure `&self`
+//!   decision function cannot hold one.
+//! * `backon` 1.6 is an `Iterator` over `f32` seconds: a 100 ms base yields
+//!   `100 ms, 200.000_003 ms, 400.000_006 ms, 800.000_012 ms, 1.600_000_024 s`,
+//!   and entry `n` costs `n` iterator steps, so a `u32::MAX` attempt budget is
+//!   unbounded work.
+//! * `retry-policies` 0.5 answers with a `SystemTime` (a wall-clock correction
+//!   moves the wait), takes no server hint at all, and models no idempotency.
+//!
+//! What remains is `u32` shifts on `Duration` plus the two rules only this crate
+//! knows: Telegram hints are authoritative, and a send is never retried after an
+//! ambiguous failure.
 
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
-use std::task::{Context, Poll, Waker};
 use std::time::Duration;
 
 use crate::error::Error;
@@ -91,11 +119,12 @@ impl Sleeper for NoDelay {
     }
 }
 
-/// The default sleeper: waits on a dedicated thread, so it works with any
-/// executor and never blocks the reactor.
+/// The default sleeper: a timer that works with any executor.
 ///
-/// One short-lived thread is started per wait, and only when a retry actually
-/// happens — in normal operation this costs nothing.
+/// Waiting is delegated to `futures-timer`: its `Delay` is driven by whichever
+/// executor polls the future and counts down on one shared timer thread, so the
+/// crate still depends on no specific runtime and a retry no longer spawns a
+/// thread of its own.
 ///
 /// ```rust
 /// use std::time::{Duration, Instant};
@@ -104,7 +133,7 @@ impl Sleeper for NoDelay {
 /// # async fn demo() {
 /// let start = Instant::now();
 /// ThreadSleeper.sleep(Duration::from_millis(20)).await;
-/// assert!(start.elapsed() >= Duration::from_millis(20));
+/// assert!(start.elapsed() >= Duration::from_millis(20), "never completes early");
 /// # }
 /// ```
 #[derive(Debug, Clone, Copy, Default)]
@@ -112,79 +141,10 @@ pub struct ThreadSleeper;
 
 impl Sleeper for ThreadSleeper {
     fn sleep(&self, delay: Duration) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
-        Box::pin(ThreadWait {
-            delay,
-            state: Arc::new(WaitState::default()),
-            spawned: false,
-        })
-    }
-}
-
-/// Shared between the future and its sleeping thread.
-#[derive(Default)]
-struct WaitState {
-    /// Set by the thread once it has actually slept for the whole delay.
-    finished: AtomicBool,
-    /// The task to wake; replaced on every poll, taken by the thread.
-    waker: Mutex<Option<Waker>>,
-}
-
-/// Future that becomes ready once a helper thread has slept long enough.
-struct ThreadWait {
-    delay: Duration,
-    state: Arc<WaitState>,
-    spawned: bool,
-}
-
-impl Future for ThreadWait {
-    type Output = ();
-
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
-        let this = self.get_mut();
-        if this.delay.is_zero() || this.state.finished.load(Ordering::Acquire) {
-            return Poll::Ready(());
+        if delay.is_zero() {
+            return Box::pin(std::future::ready(()));
         }
-        // Register the waker on *every* poll: an executor is free to poll a
-        // future more than once before the thread finishes, and dropping the
-        // newest waker would park the task forever.
-        {
-            let mut slot = this
-                .state
-                .waker
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            *slot = Some(cx.waker().clone());
-        }
-        if this.spawned {
-            // Already waiting: a second poll must stay pending until the thread
-            // says otherwise. Completing here would skip the whole delay.
-            return Poll::Pending;
-        }
-        this.spawned = true;
-        let state = Arc::clone(&this.state);
-        let delay = this.delay;
-        let spawned = std::thread::Builder::new()
-            .name("telegram-api-client-sleep".to_string())
-            .spawn(move || {
-                std::thread::sleep(delay);
-                state.finished.store(true, Ordering::Release);
-                let waker = state
-                    .waker
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .take();
-                if let Some(waker) = waker {
-                    waker.wake();
-                }
-            });
-        if spawned.is_err() {
-            // No thread available. Sleep on the current thread instead of
-            // completing early: returning `Ready` here would silently turn a
-            // rate-limit delay into no delay at all.
-            std::thread::sleep(this.delay);
-            return Poll::Ready(());
-        }
-        Poll::Pending
+        Box::pin(futures_timer::Delay::new(delay))
     }
 }
 
@@ -348,99 +308,54 @@ impl RetryPolicy {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
-    use std::task::{Wake, Waker};
     use std::time::Instant;
 
     use super::*;
 
-    /// A waker that counts how often the task was woken.
-    #[derive(Default)]
-    struct CountingWaker(AtomicUsize);
-
-    impl Wake for CountingWaker {
-        fn wake(self: Arc<Self>) {
-            self.0.fetch_add(1, AtomicOrdering::SeqCst);
-        }
-
-        fn wake_by_ref(self: &Arc<Self>) {
-            self.0.fetch_add(1, AtomicOrdering::SeqCst);
-        }
-    }
-
-    fn counting() -> (Waker, Arc<CountingWaker>) {
-        let counter = Arc::new(CountingWaker::default());
-        (Waker::from(Arc::clone(&counter)), counter)
-    }
-
-    /// The default sleeper used to treat "already started" as "already done",
-    /// so a single spurious poll completed the wait immediately. A second poll
-    /// before the thread has slept must stay pending.
+    /// The sleeper is what the client stores behind an `Arc<dyn Sleeper>`.
     #[test]
-    fn a_second_poll_does_not_skip_the_wait() {
-        let (waker, counter) = counting();
-        let mut context = Context::from_waker(&waker);
-        let mut future = ThreadSleeper.sleep(Duration::from_millis(80));
+    fn the_sleepers_are_shareable_across_tasks() {
+        fn assert_static<T: Send + Sync + 'static>() {}
+        assert_static::<ThreadSleeper>();
+        assert_static::<NoDelay>();
+    }
 
+    /// The delegated timer must not complete early: a retry that fires before the
+    /// delay is exactly the double 429 the policy exists to avoid.
+    #[test]
+    fn the_thread_sleeper_waits_at_least_the_delay() {
         let start = Instant::now();
+        futures::executor::block_on(ThreadSleeper.sleep(Duration::from_millis(60)));
+        let elapsed = start.elapsed();
         assert!(
-            future.as_mut().poll(&mut context).is_pending(),
-            "the first poll starts the wait"
-        );
-        // The poll the old `started` flag mistook for completion.
-        assert!(
-            future.as_mut().poll(&mut context).is_pending(),
-            "a spurious poll must not complete the delay"
-        );
-        assert!(
-            future.as_mut().poll(&mut context).is_pending(),
-            "and neither must a third"
-        );
-        assert!(
-            start.elapsed() < Duration::from_millis(80),
-            "the wait had not finished yet"
-        );
-
-        // The thread wakes the task when, and only when, it has slept it out.
-        // Wait for that wake instead of for a fixed wall-clock margin: on a
-        // loaded machine (a full parallel test run) the helper thread can be
-        // scheduled later than the margin, and a `sleep(120ms)` here then polls
-        // before `finished` is set. The wake happens after the store, so once
-        // the counter moves the poll is ready by construction.
-        let deadline = start + Duration::from_secs(10);
-        while counter.0.load(AtomicOrdering::SeqCst) == 0 {
-            assert!(Instant::now() < deadline, "the sleeper never woke the task");
-            std::thread::sleep(Duration::from_millis(2));
-        }
-        assert_eq!(future.as_mut().poll(&mut context), Poll::Ready(()));
-        assert!(start.elapsed() >= Duration::from_millis(80));
-        assert!(
-            counter.0.load(AtomicOrdering::SeqCst) >= 1,
-            "the sleeper woke the task instead of letting it spin"
+            elapsed >= Duration::from_millis(60),
+            "completed after {elapsed:?}, less than the 60 ms asked for",
         );
     }
 
-    /// A poll after the thread finished completes, and the zero-delay case
-    /// never spawns anything.
+    /// Zero and `NoDelay` return at once, whatever the executor.
     #[test]
-    fn completion_and_zero_delay_behave() {
-        let (waker, _counter) = counting();
-        let mut context = Context::from_waker(&waker);
+    fn zero_delay_and_no_delay_return_immediately() {
+        let start = Instant::now();
+        futures::executor::block_on(ThreadSleeper.sleep(Duration::ZERO));
+        futures::executor::block_on(NoDelay.sleep(Duration::from_secs(3600)));
+        let elapsed = start.elapsed();
+        assert!(elapsed < Duration::from_secs(1), "no wait was requested");
+    }
 
-        let mut zero = NoDelay.sleep(Duration::from_secs(3600));
-        assert_eq!(zero.as_mut().poll(&mut context), Poll::Ready(()));
-
-        let mut immediate = ThreadSleeper.sleep(Duration::ZERO);
-        assert_eq!(
-            immediate.as_mut().poll(&mut context),
-            Poll::Ready(()),
-            "a zero delay needs no thread"
+    /// Many waits share one timer thread: interleaved delays must all complete,
+    /// and must not serialise into the sum of their durations.
+    #[test]
+    fn interleaved_waits_share_the_timer() {
+        let start = Instant::now();
+        let waits = (0..32).map(|_| ThreadSleeper.sleep(Duration::from_millis(40)));
+        futures::executor::block_on(futures::future::join_all(waits));
+        let elapsed = start.elapsed();
+        assert!(elapsed >= Duration::from_millis(40), "waited {elapsed:?}");
+        assert!(
+            elapsed < Duration::from_millis(600),
+            "32 waits of 40 ms took {elapsed:?}, which is serialised, not shared"
         );
-
-        let mut short = ThreadSleeper.sleep(Duration::from_millis(10));
-        assert!(short.as_mut().poll(&mut context).is_pending());
-        std::thread::sleep(Duration::from_millis(40));
-        assert_eq!(short.as_mut().poll(&mut context), Poll::Ready(()));
     }
 
     #[test]
