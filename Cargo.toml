@@ -41,3 +41,14 @@ missing_docs = "deny"
 [lints.clippy]
 all = "warn"
 pedantic = "warn"
+
+# Examples are part of the package: `cargo build --examples --all-features` is a
+# named CI gate, and the two that talk to the Bot API say so, so
+# `--no-default-features` does not try to build them without `http`.
+[[example]]
+name = "send_text"
+required-features = ["http"]
+
+[[example]]
+name = "poll_once"
+required-features = ["http"]

@@ -8,6 +8,13 @@ means for this API is spelled out in the README under
 
 ## [Unreleased]
 
+### Added
+
+- `examples/send_text.rs`, `examples/poll_once.rs` and `examples/webhook.rs`, all
+  runnable without a bot token (offline the first two print the request body or
+  replay a `MockTransport` batch, the third needs no network at all), plus
+  `cargo build --examples --all-features` as a named CI gate.
+
 ## [0.1.3] - 2026-10-25
 
 ### Added

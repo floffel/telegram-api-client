@@ -62,6 +62,23 @@ client.send_photo(&photo).await?;
 # Ok(()) }
 ```
 
+## Examples
+
+Three examples ship in the package, each runnable without a bot account —
+without `TELEGRAM_BOT_TOKEN` they use `MockTransport` or build the request
+offline instead of opening a socket, and print what they would do:
+
+```text
+cargo run --example send_text     # one message; without a token, the JSON body
+cargo run --example poll_once     # drain one getUpdates batch, exactly once
+cargo run --example webhook       # verify secret + path, parse the update
+```
+
+`poll_once` is the one worth reading: it feeds a batch with a duplicate through
+`UpdateCursor`, so the output shows `3 delivered, 2 not seen before` and a
+redelivery of the same batch adds nothing. `webhook` runs fully offline and ends
+by printing the three rejections — wrong secret, missing header, wrong path.
+
 ## Implemented surface
 
 | Bot API | client method | request type |
@@ -260,7 +277,8 @@ compiling and fails loudly instead of silently dropping the file.
 ## Quality gates
 
 CI runs `cargo fmt --check`, `cargo clippy --all-targets --all-features --
--D warnings`, `cargo test` with and without default features, `cargo doc` with
+-D warnings`, `cargo build --examples --all-features` (a named gate, so a
+broken example fails under its own name), `cargo test` with and without default features, `cargo doc` with
 `-D warnings`, `cargo deny check`, and a coverage job
 (`cargo llvm-cov --all-features --fail-under-lines 95`). Local numbers for
 0.1.2: **97.6 % line, 96.9 % region, 99.0 % function coverage**. The lines that
