@@ -357,7 +357,11 @@ impl EditMessageMedia {
             });
         }
         if let Some(upload) = &self.media.upload {
-            upload.validate_for("media", self.media.kind.mime_families())?;
+            upload.validate_with_limit(
+                "media",
+                self.media.kind.mime_families(),
+                self.media.kind.upload_limit_bytes(),
+            )?;
         }
         match self.media.caption.as_deref() {
             None => Ok(()),

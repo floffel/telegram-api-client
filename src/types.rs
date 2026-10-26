@@ -10,6 +10,7 @@ use std::fmt;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
 
+use crate::send::{MAX_PHOTO_BYTES, MAX_UPLOAD_BYTES};
 use crate::update::User;
 
 /// Generates a string-backed enum that keeps unknown wire values instead of
@@ -321,6 +322,30 @@ impl InputMediaKind {
             Self::Animation => &["image/", "video/"],
             Self::Audio => &["audio/"],
             Self::Document | Self::Unknown(_) => &[],
+        }
+    }
+
+    /// Bytes this kind of media may carry in a multipart upload.
+    ///
+    /// Photos are capped at 10 MB and everything else at 50 MB (Bot API,
+    /// "Sending files": "10 MB max size for photos, 50 MB for other files").
+    /// Unknown kinds get the general budget: the crate does not know what they
+    /// carry, and refusing them would reject payloads Telegram accepts.
+    ///
+    /// ```rust
+    /// use telegram_api_client::{InputMediaKind, MAX_PHOTO_BYTES, MAX_UPLOAD_BYTES};
+    ///
+    /// assert_eq!(InputMediaKind::Photo.upload_limit_bytes(), MAX_PHOTO_BYTES);
+    /// assert_eq!(InputMediaKind::Video.upload_limit_bytes(), MAX_UPLOAD_BYTES);
+    /// assert_eq!(InputMediaKind::from("sticker").upload_limit_bytes(), MAX_UPLOAD_BYTES);
+    /// ```
+    #[must_use]
+    pub fn upload_limit_bytes(&self) -> usize {
+        match self {
+            Self::Photo => MAX_PHOTO_BYTES,
+            Self::Video | Self::Animation | Self::Audio | Self::Document | Self::Unknown(_) => {
+                MAX_UPLOAD_BYTES
+            }
         }
     }
 

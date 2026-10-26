@@ -208,6 +208,17 @@ assert!(request.multipart_form().is_some());
 
 * `UploadFile::from_path` reads from disk, rejecting files over 50 MB
   (`MAX_UPLOAD_BYTES`) **before** allocating.
+* The ceiling belongs to the operation, not to the bytes: `sendPhoto`, a photo
+  item in `sendMediaGroup` and `editMessageMedia` carrying a photo are capped at
+  `MAX_PHOTO_BYTES` (10 MB), everything else at `MAX_UPLOAD_BYTES` (50 MB) —
+  "10 MB max size for photos, 50 MB for other files" in the Bot API docs.
+  `UploadFile::validate_with_limit` takes the ceiling explicitly;
+  `validate()`/`validate_for()` keep the general 50 MB budget.
+* Sending by URL is capped by Telegram at 5 MB for photos and 20 MB for other
+  files (`MAX_PHOTO_URL_BYTES`, `MAX_FILE_URL_BYTES`), and `getFile` downloads
+  stop at 20 MB (`MAX_DOWNLOAD_BYTES`, pre-check with
+  `File::fits_download_limit`). A URL carries no size, so the crate documents
+  those three instead of pretending to enforce them.
 * The MIME type is guessed from the extension (`guess_mime`) and may be
   overridden; a syntactically invalid type (`is_valid_mime`) is refused.
 * Each method accepts only the families Telegram accepts: `image/` for photos,

@@ -33,11 +33,63 @@ pub const MIN_POLL_OPTIONS: usize = 2;
 pub const MAX_MEDIA_GROUP: usize = 10;
 /// Fewest items a media group may contain.
 pub const MIN_MEDIA_GROUP: usize = 2;
-/// Most bytes the Bot API accepts for a single upload (50 MB).
+/// Most bytes the Bot API accepts for a non-photo upload (50 MB).
+///
+/// From the Bot API, "Sending files": "Post the file using multipart/form-data
+/// in the usual way that files are uploaded via the browser. 10 MB max size for
+/// photos, 50 MB for other files." Photos therefore get [`MAX_PHOTO_BYTES`];
+/// `sendDocument`, `sendAudio`, `sendVideo`, `sendAnimation` and `sendVoice` use
+/// this budget, and so do albums and message edits of non-photo media.
 ///
 /// Checked before the request is built, so an oversized file is rejected
 /// without allocating a body or opening a socket.
 pub const MAX_UPLOAD_BYTES: usize = 50 * 1024 * 1024;
+/// Most bytes a photo upload may carry (10 MB).
+///
+/// The same "Sending files" sentence caps photos at 10 MB, and `sendPhoto`
+/// repeats it: "The photo must be at most 10 MB in size." A larger image still
+/// fits the 50 MB budget of [`MAX_UPLOAD_BYTES`] when it goes out as a document.
+///
+/// This limit applies to `sendPhoto`, to a photo item in `sendMediaGroup` and to
+/// `editMessageMedia` carrying a photo — every operation that validates through
+/// [`UploadFile::validate_with_limit`].
+///
+/// ```rust
+/// use telegram_api_client::{MAX_PHOTO_BYTES, MAX_UPLOAD_BYTES};
+///
+/// assert_eq!(MAX_PHOTO_BYTES, 10 * 1024 * 1024);
+/// assert!(MAX_PHOTO_BYTES < MAX_UPLOAD_BYTES);
+/// ```
+pub const MAX_PHOTO_BYTES: usize = 10 * 1024 * 1024;
+/// Most bytes Telegram downloads when a photo is sent by URL (5 MB).
+///
+/// "Sending files": "Provide Telegram with an HTTP URL for the file to be sent.
+/// Telegram will download and send the file. 5 MB max size for photos and 20 MB
+/// max for other types of content." A URL reference carries no size, so the
+/// crate cannot enforce this ceiling; the constant is here for a caller that
+/// knows the remote size and wants to check before handing over the URL.
+///
+/// ```rust
+/// use telegram_api_client::MAX_PHOTO_URL_BYTES;
+///
+/// let remote_bytes = 4 * 1024 * 1024;
+/// assert!(remote_bytes <= MAX_PHOTO_URL_BYTES);
+/// ```
+pub const MAX_PHOTO_URL_BYTES: usize = 5 * 1024 * 1024;
+/// Most bytes Telegram downloads when any other file is sent by URL (20 MB).
+///
+/// The 20 MB half of the [`MAX_PHOTO_URL_BYTES`] sentence: documents, audio,
+/// video, animations and voice notes. Enforced by the caller, for the same
+/// reason — nothing about a URL tells the crate how large the file is.
+///
+/// ```rust
+/// use telegram_api_client::{MAX_FILE_URL_BYTES, MAX_PHOTO_URL_BYTES};
+///
+/// let remote_bytes = 18 * 1024 * 1024;
+/// assert!(remote_bytes <= MAX_FILE_URL_BYTES);
+/// assert!(MAX_PHOTO_URL_BYTES < MAX_FILE_URL_BYTES);
+/// ```
+pub const MAX_FILE_URL_BYTES: usize = 20 * 1024 * 1024;
 /// Longest accepted file name, in bytes.
 pub const MAX_FILENAME_BYTES: usize = 255;
 
@@ -191,7 +243,11 @@ impl UploadFile {
         self.bytes.is_empty()
     }
 
-    /// Checks name, MIME type and size.
+    /// Checks name, MIME type and size against the general 50 MB budget.
+    ///
+    /// This is the document budget ([`MAX_UPLOAD_BYTES`]). An operation that caps
+    /// photos lower validates through [`Self::validate_with_limit`] with
+    /// [`MAX_PHOTO_BYTES`] instead; [`Self::validate_for`] keeps this budget too.
     ///
     /// # Errors
     ///
@@ -212,6 +268,43 @@ impl UploadFile {
     /// assert!(injection.validate().is_err());
     /// ```
     pub fn validate(&self) -> Result<()> {
+        self.validate_with_limit("file", &[], MAX_UPLOAD_BYTES)
+    }
+
+    /// Checks the file against one operation limit: MIME families and bytes.
+    ///
+    /// `max_bytes` is the ceiling of the operation that will carry the file —
+    /// [`MAX_PHOTO_BYTES`] for `sendPhoto`, [`MAX_UPLOAD_BYTES`] for a document.
+    /// An empty `families` slice accepts any type, which is right for
+    /// `sendDocument`.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidRequest`] for an empty or unusable file name, a MIME type
+    /// that is not `type/subtype`, an empty payload, a payload of more than
+    /// `max_bytes` bytes, or a MIME type outside `families`.
+    ///
+    /// ```rust
+    /// use telegram_api_client::{MAX_PHOTO_BYTES, MAX_UPLOAD_BYTES, UploadFile};
+    ///
+    /// // Exactly at the photo limit: accepted.
+    /// let at_limit = UploadFile::new("a.png", vec![0; MAX_PHOTO_BYTES]);
+    /// assert!(at_limit.validate_with_limit("photo", &["image/"], MAX_PHOTO_BYTES).is_ok());
+    ///
+    /// // One byte over: refused, and the message names the limit.
+    /// let over = UploadFile::new("a.png", vec![0; MAX_PHOTO_BYTES + 1]);
+    /// let error = over.validate_with_limit("photo", &["image/"], MAX_PHOTO_BYTES).unwrap_err();
+    /// assert!(error.to_string().contains(&MAX_PHOTO_BYTES.to_string()));
+    ///
+    /// // The same bytes are fine as a document.
+    /// assert!(over.validate_with_limit("document", &[], MAX_UPLOAD_BYTES).is_ok());
+    /// ```
+    pub fn validate_with_limit(
+        &self,
+        field: &'static str,
+        families: &[&str],
+        max_bytes: usize,
+    ) -> Result<()> {
         validate_filename(&self.filename)?;
         if !is_valid_mime(&self.mime) {
             return Err(Error::InvalidRequest {
@@ -225,22 +318,34 @@ impl UploadFile {
                 reason: "must not be empty".to_string(),
             });
         }
-        if self.bytes.len() > MAX_UPLOAD_BYTES {
+        if self.bytes.len() > max_bytes {
             return Err(Error::InvalidRequest {
                 field: "file",
                 reason: format!(
-                    "must be at most {MAX_UPLOAD_BYTES} bytes, got {}",
+                    "must be at most {max_bytes} bytes for this upload, got {}",
                     self.bytes.len()
                 ),
             });
         }
-        Ok(())
+        if families.is_empty() || families.iter().any(|family| self.mime.starts_with(family)) {
+            return Ok(());
+        }
+        Err(Error::InvalidRequest {
+            field,
+            reason: format!(
+                "`{}` cannot be used here; expected a file of type {}",
+                self.mime,
+                families.join(" or ")
+            ),
+        })
     }
 
     /// Checks the file and that its MIME type belongs to one of `families`.
     ///
     /// An empty `families` slice accepts any type — right for `sendDocument`,
-    /// which carries arbitrary files.
+    /// which carries arbitrary files. The size ceiling is the general
+    /// [`MAX_UPLOAD_BYTES`]; use [`Self::validate_with_limit`] where the
+    /// operation caps photos at [`MAX_PHOTO_BYTES`].
     ///
     /// # Errors
     ///
@@ -258,18 +363,7 @@ impl UploadFile {
     /// assert!(png.validate_for("photo", &["image/"]).is_ok());
     /// ```
     pub fn validate_for(&self, field: &'static str, families: &[&str]) -> Result<()> {
-        self.validate()?;
-        if families.is_empty() || families.iter().any(|family| self.mime.starts_with(family)) {
-            return Ok(());
-        }
-        Err(Error::InvalidRequest {
-            field,
-            reason: format!(
-                "`{}` cannot be used here; expected a file of type {}",
-                self.mime,
-                families.join(" or ")
-            ),
-        })
+        self.validate_with_limit(field, families, MAX_UPLOAD_BYTES)
     }
 
     /// Converts to the transport-level part named `field`.
@@ -738,7 +832,8 @@ macro_rules! media_send {
             pub $field:ident: String,
         }
         $doc:literal
-        accepts: $families:expr
+        accepts: $families:expr,
+        limit: $limit:expr
     ) => {
         $(#[$meta])*
         #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq)]
@@ -865,7 +960,7 @@ macro_rules! media_send {
                     });
                 }
                 if let Some(upload) = &self.upload {
-                    upload.validate_for(stringify!($field), $families)?;
+                    upload.validate_with_limit(stringify!($field), $families, $limit)?;
                 }
                 self.options.validate()
             }
@@ -889,7 +984,8 @@ media_send! {
         pub photo: String,
     }
     "A photo, referenced by `file_id` or URL."
-    accepts: &["image/"]
+    accepts: &["image/"],
+    limit: MAX_PHOTO_BYTES
 }
 
 media_send! {
@@ -906,7 +1002,8 @@ media_send! {
         pub document: String,
     }
     "A document, referenced by `file_id` or URL."
-    accepts: &[]
+    accepts: &[],
+    limit: MAX_UPLOAD_BYTES
 }
 
 media_send! {
@@ -923,7 +1020,8 @@ media_send! {
         pub audio: String,
     }
     "An audio track, referenced by `file_id` or URL."
-    accepts: &["audio/"]
+    accepts: &["audio/"],
+    limit: MAX_UPLOAD_BYTES
 }
 
 media_send! {
@@ -940,7 +1038,8 @@ media_send! {
         pub video: String,
     }
     "A video, referenced by `file_id` or URL."
-    accepts: &["video/"]
+    accepts: &["video/"],
+    limit: MAX_UPLOAD_BYTES
 }
 
 media_send! {
@@ -957,7 +1056,8 @@ media_send! {
         pub animation: String,
     }
     "An animation (GIF or soundless MP4), referenced by `file_id` or URL."
-    accepts: &["image/", "video/"]
+    accepts: &["image/", "video/"],
+    limit: MAX_UPLOAD_BYTES
 }
 
 media_send! {
@@ -974,7 +1074,8 @@ media_send! {
         pub voice: String,
     }
     "A voice note, referenced by `file_id` or URL."
-    accepts: &["audio/"]
+    accepts: &["audio/"],
+    limit: MAX_UPLOAD_BYTES
 }
 
 /// `sendMediaGroup` body — an album of 2 to 10 items.
@@ -1053,7 +1154,7 @@ impl SendMediaGroup {
             }
             if let Some(upload) = &item.upload {
                 let families = item.kind.mime_families();
-                upload.validate_for("media", families)?;
+                upload.validate_with_limit("media", families, item.kind.upload_limit_bytes())?;
             }
             if let Some(caption) = item.caption.as_deref() {
                 validate_text("caption", caption, MAX_CAPTION)?;

@@ -4,6 +4,22 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
 
+/// Most bytes Telegram serves for one downloaded file (20 MB).
+///
+/// The Bot API, `File`: "The maximum file size to download is 20 MB". `getFile`
+/// answers without a `file_path` when the file is too large, and this crate does
+/// not stream downloads, so check [`File::fits_download_limit`] (or this
+/// constant against a size you know) before pulling bytes through the URL from
+/// `TelegramClient::file_url`.
+///
+/// ```rust
+/// use telegram_api_client::MAX_DOWNLOAD_BYTES;
+///
+/// assert_eq!(MAX_DOWNLOAD_BYTES, 20 * 1024 * 1024);
+/// assert!(MAX_DOWNLOAD_BYTES < telegram_api_client::MAX_UPLOAD_BYTES);
+/// ```
+pub const MAX_DOWNLOAD_BYTES: usize = 20 * 1024 * 1024;
+
 /// `getFile` body.
 ///
 /// ```
@@ -96,5 +112,26 @@ impl File {
     #[must_use]
     pub fn is_downloadable(&self) -> bool {
         self.download_path().is_some()
+    }
+
+    /// Whether Telegram reported a size this crate may download.
+    ///
+    /// `None` when Telegram reported no `file_size`: the size is unknown, so the
+    /// call has to try the download rather than guess.
+    ///
+    /// ```rust
+    /// use telegram_api_client::{File, MAX_DOWNLOAD_BYTES};
+    ///
+    /// let at_limit = File { file_size: Some(MAX_DOWNLOAD_BYTES as u64), ..File::default() };
+    /// assert_eq!(at_limit.fits_download_limit(), Some(true));
+    ///
+    /// let over = File { file_size: Some(MAX_DOWNLOAD_BYTES as u64 + 1), ..File::default() };
+    /// assert_eq!(over.fits_download_limit(), Some(false));
+    ///
+    /// assert_eq!(File::default().fits_download_limit(), None);
+    /// ```
+    #[must_use]
+    pub fn fits_download_limit(&self) -> Option<bool> {
+        self.file_size.map(|size| size <= MAX_DOWNLOAD_BYTES as u64)
     }
 }
