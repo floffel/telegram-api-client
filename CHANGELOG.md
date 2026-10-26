@@ -6,7 +6,21 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html); what that
 means for this API is spelled out in the README under
 [Versioning and MSRV](README.md#versioning-msrv-and-changelog).
 
-## [Unreleased]
+## [0.1.4] - 2026-10-26
+
+### Changed
+
+- The default `ThreadSleeper` delegates its wait to `futures-timer` (3.0.4)
+  instead of a hand-written future with its own waker slot and one spawned
+  thread per wait. `Delay` completes on whichever executor drives the future and
+  needs no runtime activation, which was re-verified from a bare
+  `futures::executor::block_on`; the `Sleeper` trait, `NoDelay` and the retry
+  arithmetic are unchanged.
+- `src/retry.rs` now documents, with measured numbers, why the backoff curve
+  stays local while the wait does not: `backoff` 0.4 has had no release since
+  2021-12 and its `next_backoff` needs `&mut self`, `backon` 1.6 computes the
+  curve in `f32` seconds, and `retry-policies` 0.5 answers with a `SystemTime`
+  and carries no server hint (issue #15).
 
 ### Added
 
