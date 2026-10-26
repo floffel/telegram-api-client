@@ -402,7 +402,16 @@ mod tests {
         );
 
         // The thread wakes the task when, and only when, it has slept it out.
-        std::thread::sleep(Duration::from_millis(120));
+        // Wait for that wake instead of for a fixed wall-clock margin: on a
+        // loaded machine (a full parallel test run) the helper thread can be
+        // scheduled later than the margin, and a `sleep(120ms)` here then polls
+        // before `finished` is set. The wake happens after the store, so once
+        // the counter moves the poll is ready by construction.
+        let deadline = start + Duration::from_secs(10);
+        while counter.0.load(AtomicOrdering::SeqCst) == 0 {
+            assert!(Instant::now() < deadline, "the sleeper never woke the task");
+            std::thread::sleep(Duration::from_millis(2));
+        }
         assert_eq!(future.as_mut().poll(&mut context), Poll::Ready(()));
         assert!(start.elapsed() >= Duration::from_millis(80));
         assert!(
