@@ -360,3 +360,82 @@ async fn a_missing_from_disk_file_is_a_typed_error() {
         UploadFile::from_path("/nonexistent/telegram-api-client.png").expect_err("missing file");
     assert!(matches!(error, Error::InvalidRequest { field: "file", .. }));
 }
+
+// ---- the encoder as a public API: every header value is neutralised --------
+
+/// Lines in the header block that starts at the first `needle` after `from`.
+fn header_lines(body: &str, from: usize) -> Vec<&str> {
+    let rest = &body[from..];
+    let end = rest.find("\r\n\r\n").expect("header block terminator");
+    rest[..end].split("\r\n").collect()
+}
+
+#[test]
+fn a_mime_type_cannot_inject_headers() {
+    // Found by the `multipart` fuzz target: the field name and file name were
+    // escaped, the MIME type was interpolated verbatim.
+    let form = telegram_api_client::MultipartForm::new().with_file(
+        telegram_api_client::MultipartFile::new(
+            "photo",
+            "a.png",
+            "image/png\r\nX-Evil: 1",
+            vec![1],
+        ),
+    );
+    let body = String::from_utf8(form.encode("B")).expect("utf8");
+    assert!(
+        !body.contains("\r\nX-Evil: 1\r\n"),
+        "injected header: {body}"
+    );
+
+    let start = body.find("--B\r\n").expect("delimiter") + "--B\r\n".len();
+    let lines = header_lines(&body, start);
+    assert_eq!(lines.len(), 2, "one line per header: {lines:?}");
+    assert!(lines[1].starts_with("Content-Type: "), "{lines:?}");
+    assert!(!lines[0].contains('\r') && !lines[0].contains('\n'));
+}
+
+#[test]
+fn a_field_name_cannot_inject_headers() {
+    let form = telegram_api_client::MultipartForm::new()
+        .field("chat_id\r\nX-Evil: 1", "1")
+        .field("name", "value");
+    let body = String::from_utf8(form.encode("B")).expect("utf8");
+    assert!(!body.contains("X-Evil: 1\r\n"), "injected header: {body}");
+
+    let second = body.find("--B\r\n").expect("first delimiter") + "--B\r\n".len();
+    let after_first = body[second..].find("--B\r\n").expect("second delimiter");
+    let lines = header_lines(&body, second + after_first + "--B\r\n".len());
+    assert_eq!(
+        lines.len(),
+        1,
+        "a text field has one header line: {lines:?}"
+    );
+}
+
+#[test]
+fn body_content_keeps_its_line_breaks() {
+    // Escaping is for headers only: a caption with newlines must arrive intact.
+    let form = telegram_api_client::MultipartForm::new().field("caption", "line1\r\nline2");
+    let body = String::from_utf8(form.encode("B")).expect("utf8");
+    assert!(body.contains("line1\r\nline2"), "{body}");
+}
+
+#[test]
+fn a_file_payload_arrives_byte_for_byte() {
+    let payload: Vec<u8> = (0..=255).collect();
+    let form = telegram_api_client::MultipartForm::new().with_file(
+        telegram_api_client::MultipartFile::new(
+            "document",
+            "all.bin",
+            "application/octet-stream",
+            payload.clone(),
+        ),
+    );
+    let (boundary, body) = form.to_http_body();
+    let needle = payload.as_slice();
+    assert!(
+        body.windows(needle.len()).any(|window| window == needle),
+        "payload missing from the encoded body (boundary {boundary})"
+    );
+}

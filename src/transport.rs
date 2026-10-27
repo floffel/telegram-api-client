@@ -216,8 +216,13 @@ impl MultipartForm {
 
     /// Encodes the body for the given boundary.
     ///
-    /// Header values are escaped: quotes and line breaks in a file name cannot
-    /// smuggle extra headers into the request.
+    /// Header values are escaped: a quote, a backslash or a line break in a
+    /// field name, a file name or a MIME type cannot smuggle extra headers or a
+    /// whole extra part into the request. Body content is never touched, so a
+    /// caption keeps its newlines.
+    ///
+    /// `boundary` must be a multipart token without CR, LF or quotes;
+    /// [`to_http_body`](MultipartForm::to_http_body) derives one that is.
     ///
     /// ```rust
     /// use telegram_api_client::{MultipartFile, MultipartForm};
@@ -230,6 +235,13 @@ impl MultipartForm {
     /// assert!(text.contains("Content-Disposition: form-data; name=\"photo\"; filename=\"a.png\""));
     /// assert!(text.contains("Content-Type: image/png"));
     /// assert!(text.ends_with("--BOUNDARY--\r\n"));
+    ///
+    /// // A MIME type cannot add a header line either.
+    /// let hostile = MultipartForm::new()
+    ///     .with_file(MultipartFile::new("photo", "a.png", "image/png\r\nX-Evil: 1", vec![1]));
+    /// let encoded = String::from_utf8_lossy(&hostile.encode("BOUNDARY")).into_owned();
+    /// assert!(!encoded.contains("image/png\r\nX-Evil: 1\r\n"), "no injected line");
+    /// assert!(encoded.contains("Content-Type: image/png__X-Evil: 1\r\n"));
     /// ```
     #[must_use]
     pub fn encode(&self, boundary: &str) -> Vec<u8> {
@@ -256,7 +268,9 @@ impl MultipartForm {
                 )
                 .as_bytes(),
             );
-            out.extend_from_slice(format!("Content-Type: {}\r\n\r\n", file.mime).as_bytes());
+            out.extend_from_slice(
+                format!("Content-Type: {}\r\n\r\n", escape_header(&file.mime)).as_bytes(),
+            );
             out.extend_from_slice(&file.bytes);
             out.extend_from_slice(b"\r\n");
         }
@@ -292,7 +306,10 @@ impl fmt::Debug for MultipartForm {
     }
 }
 
-/// Neutralises anything that would break out of a `Content-Disposition` line.
+/// Neutralises anything that would break out of a part header line: a quote
+/// would end the attribute value, and CR, LF or any other control character
+/// would start a new header line. Applied to field names, file names and MIME
+/// types, never to body content.
 fn escape_header(value: &str) -> String {
     value
         .chars()

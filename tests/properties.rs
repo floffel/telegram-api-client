@@ -455,3 +455,57 @@ fn count(haystack: &[u8], needle: &[u8]) -> usize {
         .filter(|window| *window == needle)
         .count()
 }
+
+/// The number of header lines in the part that follows the delimiter at `from`.
+fn part_header_line_count(body: &[u8], from: usize) -> usize {
+    let rest = &body[from..];
+    let end = position(rest, b"\r\n\r\n").expect("header terminator");
+    count(&rest[..end], b"\r\n") + 1
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig { cases: 96, ..ProptestConfig::default() })]
+
+    /// No field name, file name or MIME type can add a header line, whatever
+    /// Unicode it contains — the same invariant the `multipart` fuzz target
+    /// checks, kept here so it fails on a normal `cargo test` too.
+    #[test]
+    fn multipart_header_values_never_add_a_line(
+        name in "\\PC*",
+        value in "\\PC*",
+        filename in "\\PC*",
+        mime in "\\PC*",
+    ) {
+        let form = MultipartForm::new()
+            .field(&name, &value)
+            .with_file(MultipartFile::new(&name, &filename, &mime, vec![1]));
+        let body = form.encode("BOUNDARY");
+
+        let delimiter = b"--BOUNDARY\r\n";
+        let first = position(&body, delimiter).expect("first delimiter") + delimiter.len();
+        prop_assert_eq!(part_header_line_count(&body, first), 1, "text field header");
+        let second = position(&body[first..], delimiter).expect("second delimiter");
+        prop_assert_eq!(
+            part_header_line_count(&body, first + second + delimiter.len()),
+            2,
+            "file header"
+        );
+        prop_assert_eq!(count(&body, delimiter), 2, "one delimiter per part");
+    }
+
+    /// Escaping is for headers only: an arbitrary payload arrives verbatim.
+    #[test]
+    fn multipart_payload_is_carried_verbatim(
+        payload in proptest::collection::vec(any::<u8>(), 1..318),
+        field in "\\PC{0,20}",
+    ) {
+        let form = MultipartForm::new()
+            .with_file(MultipartFile::new(field, "f.bin", "application/octet-stream", payload.clone()));
+        let (boundary, body) = form.to_http_body();
+        prop_assert!(
+            position(&body, &payload).is_some(),
+            "payload missing from a body encoded with boundary {}",
+            boundary
+        );
+    }
+}
