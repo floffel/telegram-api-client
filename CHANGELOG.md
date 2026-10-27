@@ -6,6 +6,21 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html); what that
 means for this API is spelled out in the README under
 [Versioning and MSRV](README.md#versioning-msrv-and-changelog).
 
+## [Unreleased]
+
+### Added
+
+- `UpdateCursor::ack` acknowledges one processed update and moves the watermark
+  only across a contiguous id, so a crash in the middle of a batch redelivers the
+  unhandled tail instead of losing it. `UpdateCursor::last_confirmed` exposes the
+  watermark itself for persistence, and `MAX_UPDATES_LIMIT` is re-exported at the
+  crate root.
+- The polling module documents the `getUpdates` offset contract — confirmation is
+  irrevocable and cumulative, updates expire after 24 hours — plus how to end a
+  loop cleanly. `tests/long_polling.rs` pins it (watermark, gaps, descending and
+  duplicated batches, an interruption between two acks) and
+  `examples/poll_loop.rs` runs the documented loop against a mock.
+
 ## [0.1.7] - 2026-10-27
 
 ### Fixed

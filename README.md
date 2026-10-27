@@ -64,13 +64,14 @@ client.send_photo(&photo).await?;
 
 ## Examples
 
-Three examples ship in the package, each runnable without a bot account —
+Four examples ship in the package, each runnable without a bot account —
 without `TELEGRAM_BOT_TOKEN` they use `MockTransport` or build the request
 offline instead of opening a socket, and print what they would do:
 
 ```text
 cargo run --example send_text     # one message; without a token, the JSON body
 cargo run --example poll_once     # drain one getUpdates batch, exactly once
+cargo run --example poll_loop     # long-polling loop, stops between two batches
 cargo run --example webhook       # verify secret + path, parse the update
 ```
 
@@ -267,13 +268,69 @@ compiling and fails loudly instead of silently dropping the file.
   of trusting a shipped bundle. Install a CA bundle there, or pass your own
   `reqwest::Client` through the `Transport` trait.
 
+## Long polling
+
+`getUpdates` has no "acknowledge this message" call: **the offset is the
+acknowledgement**. Telegram reads `offset = n` as "everything below `n` is
+handled", forgets those updates and never sends them again. Three properties
+follow, and they decide how a safe loop looks:
+
+- **Confirmation is irrevocable.** An update confirmed but not processed is gone.
+  That is why `UpdateCursor` exists instead of `last_id + 1` being sent blindly.
+- **Confirmation is cumulative.** `offset = 12` confirms 1..=11 whether or not
+  they were seen, so the watermark only moves forward and holes cannot be filled
+  later.
+- **Updates expire after 24 hours.** A consumer down for longer resumes at its
+  persisted offset and loses the difference; no client-side bookkeeping widens
+  that window.
+
+Two ways to move the cursor, and the choice is about crash cost:
+
+- `UpdateCursor::confirm(&batch)` advances past the highest id of a batch that
+  was handled **as a whole**. A crash between receiving and confirming repeats
+  the batch; a crash after confirming but before finishing it loses the rest.
+- `UpdateCursor::ack(id)` advances by exactly one, and only across the contiguous
+  id. A hole, a replay or a backwards id is refused and leaves the cursor alone,
+  so an update can be redelivered but never skipped. Prefer this whenever the
+  batch is processed item by item.
+
+A loop therefore looks like this — the crate owns no runtime and spawns no task,
+so "stop polling" is "stop awaiting":
+
+```rust
+let mut cursor = UpdateCursor::after(persisted_offset);
+
+while !stop.load(Ordering::Relaxed) {
+    let mut request = GetUpdates::new().timeout(25);
+    if let Some(offset) = cursor.next_offset() {
+        request = request.offset(offset);
+    }
+    for update in client.get_updates(&request).await? {
+        handle(&update).await?;          // work first,
+        cursor.ack(update.update_id);    // acknowledgement second
+    }
+}
+```
+
+Dropping the `get_updates` future (a `select!` arm, a `tokio::time::timeout`, a
+cancelled task) aborts the request and confirms nothing. Persist
+`next_offset()` to survive the process and resume with `UpdateCursor::after`:
+what was acked stays acked, what was not is delivered again — possibly twice,
+never zero times. That is the delivery contract for polling; the webhook path is
+at-most-once by comparison, because Telegram does not retry a failed delivery.
+
+`cargo run --example poll_loop` runs exactly this loop against a mock, stops
+between two polls and prints the restart, so the watermark is checkable without a
+bot token.
+
 ## Deliberate omissions
 
 - **Automatic re-send of ambiguous requests.** Never — see "Delivery
   semantics". The decision needs the caller's ledger, which the crate does not
   have.
-- **Long-polling driver.** `get_updates` + `UpdateCursor` give exactly-once
-  semantics; the loop around them belongs to the caller.
+- **A spawned long-polling task.** The loop belongs to the caller, which owns the
+  runtime and the stop signal — see "Long polling" for the offset/acknowledge
+  contract it has to respect.
 - **Forum topics** (`createForumTopic`, `editForumTopic`, `closeForumTopic`,
   `reopenForumTopic`, `deleteForumTopic`, `generalForumTopic*`,
   `getForumTopicIconStickers`) — not modelled; `message_thread_id` on sends is.
@@ -288,8 +345,6 @@ compiling and fails loudly instead of silently dropping the file.
 - **Sticker-set management** (`createNewStickerSet`, `addStickerToSet`, …) and
   **bot command management** (`setMyCommands`, `getMyCommands`, …) — not
   modelled; `setChatMenuButton` covers the menu-button entry point.
-- **Fuzz targets.** Property tests cover the encoders and the delivery
-  classification; a `cargo fuzz` target per parser is still open (issue #3).
 
 ## Quality gates
 

@@ -54,7 +54,7 @@ pub use edit::{
 };
 pub use error::{parse_retry_after, Error, Result};
 pub use file::{File, GetFile, MAX_DOWNLOAD_BYTES};
-pub use polling::{GetUpdates, UpdateCursor};
+pub use polling::{GetUpdates, UpdateCursor, MAX_UPDATES_LIMIT};
 pub use retry::{is_idempotent, NoDelay, RetryPolicy, Sleeper, ThreadSleeper};
 pub use send::{
     guess_mime, is_valid_mime, DeliveryOptions, MediaOptions, MessageOptions, SendAnimation,

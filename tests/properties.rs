@@ -508,4 +508,45 @@ proptest! {
             boundary
         );
     }
+
+    /// Acknowledgement is a contiguous watermark: it never crosses a hole, never
+    /// walks backwards, and a rejected id leaves the cursor exactly where it was,
+    /// so an update can only ever be redelivered, never skipped.
+    #[test]
+    fn acknowledgements_stay_contiguous(
+        ids in prop::collection::vec(0_i64..64, 0..40),
+        start in proptest::option::of(0_i64..64),
+    ) {
+        let mut cursor = match start {
+            Some(id) => UpdateCursor::after(id),
+            None => UpdateCursor::new(),
+        };
+        let mut watermark = cursor.last_confirmed();
+
+        for id in ids {
+            let expected = id >= 1
+                && match watermark {
+                    None => true,
+                    Some(last) => last.checked_add(1) == Some(id),
+                };
+            prop_assert_eq!(cursor.ack(id), expected, "ack({}) from {:?}", id, watermark);
+
+            let before = cursor.next_offset();
+            if expected {
+                watermark = Some(id);
+            }
+            prop_assert_eq!(cursor.last_confirmed(), watermark);
+            prop_assert_eq!(
+                cursor.next_offset(),
+                watermark.and_then(|last| last.checked_add(1).or(Some(last))),
+                "next_offset is the watermark plus one"
+            );
+            prop_assert!(
+                before <= cursor.next_offset(),
+                "the offset moved backwards: {:?} -> {:?}",
+                before,
+                cursor.next_offset()
+            );
+        }
+    }
 }

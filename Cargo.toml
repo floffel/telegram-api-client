@@ -54,3 +54,7 @@ required-features = ["http"]
 [[example]]
 name = "poll_once"
 required-features = ["http"]
+
+[[example]]
+name = "poll_loop"
+required-features = ["http"]
