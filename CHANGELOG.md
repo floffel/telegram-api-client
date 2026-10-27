@@ -10,6 +10,23 @@ means for this API is spelled out in the README under
 
 ### Added
 
+- **Every `Update` kind of Bot API 10.3.** The `Update` object modelled six of
+  its 27 payload fields; all of them are now typed: `business_connection`,
+  `business_message`, `edited_business_message`, `deleted_business_messages`,
+  `guest_message`, `message_reaction`, `message_reaction_count`,
+  `chosen_inline_result`, `shipping_query`, `pre_checkout_query`,
+  `purchased_paid_media`, `poll`, `poll_answer`, `my_chat_member`, `chat_member`,
+  `chat_join_request`, `chat_boost`, `removed_chat_boost`, `managed_bot`,
+  `subscription`, `stopped_message_generation` — plus the four message variants
+  the crate already had. The payload types live in the new `events` module.
+- `BOT_API_VERSION` pins the revision the shapes were checked against (**10.3**);
+  `docs/contracts.md` records the field table and its source URL.
+- `Update::kind()` classifies an update into `UpdateKind`, `UpdateKind::ALL`
+  lists all 27 kinds in `Update` field order, and `chat_member_update()` reaches
+  a membership change from either `my_chat_member` or `chat_member`.
+- `tests/update_surface.rs` carries one JSON fixture per kind and fails when a
+  kind has none: classification, serde round trip, unknown-field tolerance and
+  camelCase aliases are all asserted from the same table.
 - `UpdateCursor::ack` acknowledges one processed update and moves the watermark
   only across a contiguous id, so a crash in the middle of a batch redelivers the
   unhandled tail instead of losing it. `UpdateCursor::last_confirmed` exposes the
@@ -20,6 +37,16 @@ means for this API is spelled out in the README under
   loop cleanly. `tests/long_polling.rs` pins it (watermark, gaps, descending and
   duplicated batches, an interruption between two acks) and
   `examples/poll_loop.rs` runs the documented loop against a mock.
+
+### Changed
+
+- **`Update` payload fields are boxed** (`Option<Box<Message>>` and so on).
+  With all 27 fields inline the struct had grown to 8184 bytes, so a
+  `getUpdates` batch of 100 updates copied ~800 KB and tripped
+  `clippy::large_stack_arrays` in two call sites; one `Update` is now 224 bytes.
+  Field access is unchanged (`Box` derefs), but code that names the field types
+  explicitly — `fn handle(update: Option<Message>)` — has to say `Box<Message>`.
+  A test pins the size at 512 bytes.
 
 ## [0.1.7] - 2026-10-27
 

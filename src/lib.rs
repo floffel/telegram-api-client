@@ -2,7 +2,8 @@
 //!
 //! * [`webhook`] verifies the `X-Telegram-Bot-Api-Secret-Token` header and the
 //!   derived webhook path.
-//! * [`update`] parses `Update` payloads into typed messages.
+//! * [`update`] parses `Update` payloads into typed messages, and [`events`] holds
+//!   the payloads of all 27 update kinds of the pinned Bot API version.
 //! * [`client`] sends every modelled method through a pluggable [`Transport`].
 //! * [`types`] holds `ChatId`, parse modes, entities and keyboards.
 //!
@@ -29,6 +30,7 @@ pub mod chat;
 pub mod client;
 pub mod edit;
 pub mod error;
+pub mod events;
 pub mod file;
 pub mod polling;
 pub mod retry;
@@ -53,6 +55,14 @@ pub use edit::{
     EditMessageText, EditResult, EditTarget, ForwardMessage, MessageId,
 };
 pub use error::{parse_retry_after, Error, Result};
+pub use events::{
+    BotSubscriptionUpdated, BusinessBotRights, BusinessConnection, BusinessMessagesDeleted,
+    ChatBoost, ChatBoostRemoved, ChatBoostSource, ChatBoostUpdated, ChatInviteLink,
+    ChatJoinRequest, ChatMemberUpdated, ChosenInlineResult, Location, ManagedBotUpdated,
+    MessageGenerationStopped, MessageReactionCountUpdated, MessageReactionUpdated, OrderInfo,
+    PaidMediaPurchased, Poll, PollAnswer, PollOption, PreCheckoutQuery, ReactionCount,
+    ReactionType, ShippingAddress, ShippingQuery, BOT_API_VERSION,
+};
 pub use file::{File, GetFile, MAX_DOWNLOAD_BYTES};
 pub use polling::{GetUpdates, UpdateCursor, MAX_UPDATES_LIMIT};
 pub use retry::{is_idempotent, NoDelay, RetryPolicy, Sleeper, ThreadSleeper};

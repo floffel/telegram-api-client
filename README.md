@@ -16,8 +16,8 @@ Minimal, typed client and webhook toolkit for the Telegram Bot API.
   albums can carry bytes from memory or disk (multipart), not just `file_id`s.
 * **Webhook** — constant-time check of `X-Telegram-Bot-Api-Secret-Token` and of
   the webhook path derived from the secret (`sha256` hex).
-* **Updates** — typed `Update`/`Message`/`CallbackQuery`/`InlineQuery` plus
-  `UpdateCursor` for exactly-once polling.
+* **Updates** — all 27 `Update` kinds of Bot API 10.3 (`Update::kind()`), typed
+  and boxed, plus `UpdateCursor` for exactly-once polling.
 
 General-purpose: routing, persistence and the decision *what* to do after an
 ambiguous failure stay in the caller.
@@ -131,6 +131,42 @@ they return the raw `serde_json::Value` envelope. Use `send_text`,
 Reply/inline keyboards are typed (`ReplyMarkup`, `InlineKeyboardMarkup`,
 `KeyboardButton`, …), as are `MessageEntity`, `LinkPreviewOptions`, `ChatId`
 and the `MenuButton` variants.
+
+## Update surface (Bot API 10.3)
+
+`BOT_API_VERSION` pins the revision every wire shape in this crate is checked
+against — currently **10.3** (August 24, 2026). `docs/contracts.md` records the
+field table and its source URL; `tests/update_surface.rs` holds one JSON fixture
+per kind, and `UpdateKind::ALL` plus `Update::kind()` are the dispatch point:
+
+```rust
+use telegram_api_client::{Update, UpdateKind};
+
+let update: Update = serde_json::from_str(
+    r#"{"update_id":1,"chat_join_request":{"chat":{"id":-1001},"from":{"id":42}}}"#,
+)
+.unwrap();
+assert_eq!(update.kind(), Some(UpdateKind::ChatJoinRequest));
+```
+
+All 27 payload fields of the `Update` object are modelled:
+`message`, `edited_message`, `channel_post`, `edited_channel_post`,
+`business_connection`, `business_message`, `edited_business_message`,
+`deleted_business_messages`, `guest_message`, `message_reaction`,
+`message_reaction_count`, `inline_query`, `chosen_inline_result`,
+`callback_query`, `shipping_query`, `pre_checkout_query`,
+`purchased_paid_media`, `poll`, `poll_answer`, `my_chat_member`, `chat_member`,
+`chat_join_request`, `chat_boost`, `removed_chat_boost`, `managed_bot`,
+`subscription`, `stopped_message_generation`.
+
+Each payload sits behind a `Box`, so one `Update` is 224 bytes instead of 8 KiB —
+a `getUpdates` batch of 100 stays small, and a `Vec<Update>` does not copy eight
+kilobytes per element. Field access is unchanged (`Box` derefs), and a test pins
+the budget at 512 bytes so a future Bot API field cannot silently blow it up.
+
+What is still unmodelled is listed in `docs/contracts.md` (poll media, the full
+`Message` object), not hidden: `Update` parses unknown fields and unknown enum
+values without failing.
 
 ## Delivery semantics
 

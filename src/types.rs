@@ -231,11 +231,15 @@ string_enum! {
 string_enum! {
     /// Update kinds accepted by `getUpdates` and `setWebhook`.
     ///
+    /// One variant per field of the `Update` object in Bot API 10.3 — pass a
+    /// subset as `allowed_updates` to keep the queue small.
+    ///
     /// ```
     /// use telegram_api_client::UpdateKind;
     ///
     /// let kinds = [UpdateKind::Message, UpdateKind::CallbackQuery];
     /// assert_eq!(kinds[1].as_str(), "callback_query");
+    /// assert_eq!(UpdateKind::ALL.len(), 27);
     /// ```
     pub enum UpdateKind {
         /// New message.
@@ -246,12 +250,32 @@ string_enum! {
         ChannelPost => "channel_post",
         /// Edited channel post.
         EditedChannelPost => "edited_channel_post",
-        /// Inline keyboard press.
-        CallbackQuery => "callback_query",
+        /// Business account connected to or disconnected from the bot.
+        BusinessConnection => "business_connection",
+        /// Message from a connected business account.
+        BusinessMessage => "business_message",
+        /// Edited message from a connected business account.
+        EditedBusinessMessage => "edited_business_message",
+        /// Messages deleted from a connected business account.
+        DeletedBusinessMessages => "deleted_business_messages",
+        /// Guest message.
+        GuestMessage => "guest_message",
+        /// Reaction changed by a user.
+        MessageReaction => "message_reaction",
+        /// Reaction counts on a message with anonymous reactions changed.
+        MessageReactionCount => "message_reaction_count",
         /// Inline query.
         InlineQuery => "inline_query",
         /// Chosen inline result.
         ChosenInlineResult => "chosen_inline_result",
+        /// Inline keyboard press.
+        CallbackQuery => "callback_query",
+        /// Shipping query.
+        ShippingQuery => "shipping_query",
+        /// Pre-checkout query.
+        PreCheckoutQuery => "pre_checkout_query",
+        /// Paid media was purchased.
+        PurchasedPaidMedia => "purchased_paid_media",
         /// Poll state changed.
         Poll => "poll",
         /// Poll answer.
@@ -260,11 +284,58 @@ string_enum! {
         MyChatMember => "my_chat_member",
         /// Chat member changed.
         ChatMember => "chat_member",
-        /// Pre-checkout query.
-        PreCheckoutQuery => "pre_checkout_query",
-        /// Shipping query.
-        ShippingQuery => "shipping_query",
+        /// Join request sent.
+        ChatJoinRequest => "chat_join_request",
+        /// Chat boost added or changed.
+        ChatBoost => "chat_boost",
+        /// Chat boost removed.
+        RemovedChatBoost => "removed_chat_boost",
+        /// Managed bot created or changed.
+        ManagedBot => "managed_bot",
+        /// Payment subscription changed.
+        Subscription => "subscription",
+        /// User stopped message generation.
+        StoppedMessageGeneration => "stopped_message_generation",
     }
+}
+
+impl UpdateKind {
+    /// Every update kind of the pinned Bot API version, in `Update` field order.
+    ///
+    /// ```
+    /// use telegram_api_client::UpdateKind;
+    ///
+    /// assert!(UpdateKind::ALL.contains(&UpdateKind::ChatBoost));
+    /// ```
+    pub const ALL: [Self; 27] = [
+        Self::Message,
+        Self::EditedMessage,
+        Self::ChannelPost,
+        Self::EditedChannelPost,
+        Self::BusinessConnection,
+        Self::BusinessMessage,
+        Self::EditedBusinessMessage,
+        Self::DeletedBusinessMessages,
+        Self::GuestMessage,
+        Self::MessageReaction,
+        Self::MessageReactionCount,
+        Self::InlineQuery,
+        Self::ChosenInlineResult,
+        Self::CallbackQuery,
+        Self::ShippingQuery,
+        Self::PreCheckoutQuery,
+        Self::PurchasedPaidMedia,
+        Self::Poll,
+        Self::PollAnswer,
+        Self::MyChatMember,
+        Self::ChatMember,
+        Self::ChatJoinRequest,
+        Self::ChatBoost,
+        Self::RemovedChatBoost,
+        Self::ManagedBot,
+        Self::Subscription,
+        Self::StoppedMessageGeneration,
+    ];
 }
 
 string_enum! {
