@@ -6,6 +6,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html); what that
 means for this API is spelled out in the README under
 [Versioning and MSRV](README.md#versioning-msrv-and-changelog).
 
+## [0.1.7] - 2026-10-27
+
+### Fixed
+
+- The `fuzz` CI job could never run: `taiki-e/install-action@cargo-fuzz` is not a
+  recipe the action knows, so it reported success while installing nothing and
+  the next step failed with `no such command: fuzz`. It now installs the tool
+  itself (`cargo install cargo-fuzz --locked`). No change to the library: 0.1.6
+  was published by a green `Release` run, only its `CI` run was red on that
+  job.
+
 ## [0.1.6] - 2026-10-27
 
 ### Fixed

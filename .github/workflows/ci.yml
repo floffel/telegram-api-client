@@ -66,7 +66,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@nightly
         with:
           components: rustfmt, clippy
-      - uses: taiki-e/install-action@cargo-fuzz
+      # taiki-e/install-action has no recipe for cargo-fuzz: the shim reported
+      # success and installed nothing, so the next step died with "no such
+      # command: fuzz". Build the tool explicitly instead.
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
       # `fuzz/` is a standalone crate: the library's fmt/clippy jobs do not
       # reach it, so it is linted here.
       - name: Fuzz crate formatting
