@@ -59,6 +59,6 @@ optional fields can be present in any given update."*
 - `PollMedia` (the `media` / `explanation_media` union of `Animation`, `Audio`,
   `Document`, `Link`, `LivePhoto`, `Location`, `PhotoSize`, `Sticker`, `Venue`,
   `Video`) is not modelled; the poll fields that carry it are absent from
-  `Poll`. Tracked in the `Poll` media issue.
+  `Poll`. Tracked in issue #16.
 - `Message` still models the subset the crate can act on (id, chat, sender,
   date, text, caption, thread id). The rest of the object is a known gap.
