@@ -310,6 +310,41 @@ invariants, including "no state-changing request is auto-retried after a 5xx"),
 public builder), plus `api.rs`, `edge_cases.rs`, `webhook.rs`, `update.rs`,
 `client.rs` and `concurrency.rs`.
 
+## Fuzzing
+
+The three parsers that face the outside world have a `cargo-fuzz` target under
+`fuzz/`, one per parser, built and smoked on nightly by CI:
+
+- **`update`** — `serde_json::from_slice::<Update>` on arbitrary bytes (broken
+  UTF-8, truncated objects, deeply nested arrays, unknown fields). Invariants:
+  parsing never panics, every accessor is total, and a payload the crate accepts
+  survives a serialise/parse round trip unchanged.
+- **`webhook`** — `WebhookGuard::verify_and_parse` on arbitrary secret, header,
+  path and body. Invariants: a missing or wrong secret is always `Err`, and it is
+  the *first* error — `Payload` is only reported after both checks passed, so a
+  forged request can never be misread as a malformed one.
+- **`multipart`** — the encoder on arbitrary field names, values, file names,
+  MIME types and payloads. Invariants: exactly one header line per header per
+  part (nothing a caller passes can add a line or a part), the body arrives byte
+  for byte, and encoding is deterministic.
+
+```
+cd fuzz
+cargo fuzz build
+cargo fuzz run update    seeds/update
+cargo fuzz run webhook   seeds/webhook
+cargo fuzz run multipart seeds/multipart
+```
+
+The targets need nightly and `cargo fuzz`; the library itself does not. `fuzz/`
+is a standalone crate, excluded from the published package, so it cannot affect
+the coverage number or the MSRV job.
+
+The `multipart` target paid for itself on its first run: it produced a MIME type
+(`"\n-"`) that added a header line to a part, because the field name and file
+name were escaped while the MIME type was interpolated verbatim. Fixed in 0.1.6
+and pinned by `multipart_header_values_never_add_a_line` in `tests/properties.rs`.
+
 ## Versioning, MSRV and changelog
 
 The crate follows [SemVer 2.0.0](https://semver.org/spec/v2.0.0.html). While the

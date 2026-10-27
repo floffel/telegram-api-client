@@ -10,7 +10,7 @@ documentation = "https://docs.rs/telegram-api-client"
 keywords = ["telegram", "bot", "api", "webhook"]
 categories = ["api-bindings", "web-programming"]
 readme = "README.md"
-exclude = [".github/**", "deny.toml"]
+exclude = [".github/**", "deny.toml", "fuzz/**"]
 
 # docs.rs must render the full surface: the reqwest transport behind `http` and
 # the offline MockTransport path alike.

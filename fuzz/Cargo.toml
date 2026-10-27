@@ -1,0 +1,45 @@
+[package]
+name = "telegram-api-client-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+license = "Apache-2.0 OR MIT"
+description = "Fuzz targets for telegram-api-client"
+
+# A standalone crate: it needs nightly and libFuzzer, which the library does
+# not, and `cargo publish` of the library must never pick it up.
+[workspace]
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = { version = "0.4", features = ["arbitrary-derive"] }
+serde_json = "1"
+telegram-api-client = { path = ".." }
+
+# One target per parser: an `Update` payload, the webhook guard, and the
+# multipart encoder.
+[[bin]]
+name = "update"
+path = "fuzz_targets/update.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "webhook"
+path = "fuzz_targets/webhook.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "multipart"
+path = "fuzz_targets/multipart.rs"
+test = false
+doc = false
+bench = false
+
+[profile.release]
+debug = 1

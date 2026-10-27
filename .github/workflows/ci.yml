@@ -56,3 +56,34 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.89
       - run: cargo check --all-targets --all-features
       - run: cargo check --no-default-features
+
+  # The three fuzz targets are a gate, not a nightly chore: a target that stops
+  # compiling, or starts panicking on its seed corpus, turns this job red.
+  fuzz:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rustfmt, clippy
+      - uses: taiki-e/install-action@cargo-fuzz
+      # `fuzz/` is a standalone crate: the library's fmt/clippy jobs do not
+      # reach it, so it is linted here.
+      - name: Fuzz crate formatting
+        working-directory: fuzz
+        run: cargo fmt --check
+      - name: Fuzz crate lints
+        working-directory: fuzz
+        run: cargo clippy --all-targets -- -D warnings
+      - name: Fuzz targets compile
+        working-directory: fuzz
+        run: cargo fuzz build
+      - name: Every target smokes on its seed corpus
+        working-directory: fuzz
+        run: |
+          set -e
+          for target in update webhook multipart; do
+            echo "::group::$target"
+            cargo fuzz run "$target" "seeds/$target" -- -max_total_time=20 -rss_limit_mb=2048
+            echo "::endgroup::"
+          done
