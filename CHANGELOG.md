@@ -6,6 +6,35 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html); what that
 means for this API is spelled out in the README under
 [Versioning and MSRV](README.md#versioning-msrv-and-changelog).
 
+## [0.1.6] - 2026-10-27
+
+### Fixed
+
+- A `MultipartFile` MIME type reached the part header unescaped: a value such as
+  `"image/png\r\nX-Evil: 1"` added a header line to the encoded body. Field names
+  and file names were already neutralised, the MIME type was interpolated
+  verbatim. Found by the new `multipart` fuzz target on its first run; pinned by
+  `a_mime_type_cannot_inject_headers` and the property
+  `multipart_header_values_never_add_a_line`. `UploadFile::validate` already
+  rejected such a type, but `MultipartForm` is public, so the encoder has to hold
+  on its own.
+
+### Added
+
+- `fuzz/`: a `cargo-fuzz` target per parser — `update`
+  (`serde_json::from_slice::<Update>` on arbitrary bytes, plus a serialise/parse
+  round trip), `webhook` (`WebhookGuard::verify_and_parse` on arbitrary secret,
+  header, path and body; a wrong secret is always the *first* error) and
+  `multipart` (the encoder on arbitrary names, values, MIME types and payloads;
+  one header line per header, payload verbatim). Each ships a seed corpus.
+- A CI `fuzz` job on nightly: `cargo fmt --check` and
+  `cargo clippy --all-targets -- -D warnings` on the fuzz crate, `cargo fuzz
+  build`, then a 20-second smoke run per target. A target that stops compiling
+  or starts panicking turns the run red.
+- README section "Fuzzing" naming the three targets and what each asserts.
+  `fuzz/**` is excluded from the published package, so the coverage number and
+  the MSRV job are unaffected.
+
 ## [0.1.5] - 2026-10-26
 
 ### Fixed
