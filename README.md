@@ -164,9 +164,12 @@ a `getUpdates` batch of 100 stays small, and a `Vec<Update>` does not copy eight
 kilobytes per element. Field access is unchanged (`Box` derefs), and a test pins
 the budget at 512 bytes so a future Bot API field cannot silently blow it up.
 
-What is still unmodelled is listed in `docs/contracts.md` (poll media, the full
-`Message` object), not hidden: `Update` parses unknown fields and unknown enum
-values without failing.
+What is still unmodelled is listed in `docs/contracts.md` (the full `Message`
+object), not hidden: `Update` parses unknown fields and unknown enum values
+without failing. Poll media is modelled: `Poll::media`,
+`Poll::explanation_media` and `PollOption::media` carry `PollMedia`, whose ten
+member objects (`Animation`, `Audio`, `Document`, `Link`, `LivePhoto`,
+`Location`, `PhotoSize[]`, `Sticker`, `Venue`, `Video`) are typed.
 
 ## Delivery semantics
 
