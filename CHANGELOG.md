@@ -6,7 +6,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html); what that
 means for this API is spelled out in the README under
 [Versioning and MSRV](README.md#versioning-msrv-and-changelog).
 
-## [Unreleased]
+## [0.1.8] - 2026-10-28
 
 ### Added
 
@@ -38,6 +38,21 @@ means for this API is spelled out in the README under
   duplicated batches, an interruption between two acks) and
   `examples/poll_loop.rs` runs the documented loop against a mock.
 
+- **`PollMedia` and the member objects it carries.** A poll question, its
+  explanation and a poll option can each carry media; `Poll::media`,
+  `Poll::explanation_media` and `PollOption::media` were absent from the model,
+  so such a poll parsed with that content silently dropped. All three are typed
+  now, with `Animation`, `Audio`, `Document`, `Link`, `LivePhoto`, `Location`,
+  `PhotoSize[]`, `Sticker`, `Venue` and `Video` modelled from the field tables of
+  Bot API 10.3 (`docs/contracts.md` records the source URL, the fetch date and the
+  field-to-Rust mapping). `PollMedia` is a flat object with ten optional members,
+  not a tagged union — issue #16 had assumed `#[serde(tag = "type")]` and the
+  published object says otherwise — so `PollMedia::kind()` and `is_empty()` read
+  it without guessing.
+- `VideoQuality` and `MaskPosition` are modelled as well, `Video` carries
+  `qualities`, and `Sticker` carries `mask_position` and `premium_animation`.
+  `MaskPosition` compares its floats by bit pattern, so `Eq` stays sound for
+  `NaN`, matching `Location`.
 ### Changed
 
 - **`Update` payload fields are boxed** (`Option<Box<Message>>` and so on).
