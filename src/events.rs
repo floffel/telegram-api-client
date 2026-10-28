@@ -11,6 +11,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::chat::ChatMember;
+use crate::media::PollMedia;
 use crate::types::MessageEntity;
 use crate::update::{Chat, User};
 
@@ -986,6 +987,9 @@ pub struct PollOption {
         skip_serializing_if = "Option::is_none"
     )]
     pub addition_date: Option<i64>,
+    /// Media attached to the option.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub media: Option<PollMedia>,
 }
 
 /// The state of a poll.
@@ -1066,6 +1070,16 @@ pub struct Poll {
         skip_serializing_if = "Option::is_none"
     )]
     pub explanation_entities: Option<Vec<MessageEntity>>,
+    /// Media attached to the question.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub media: Option<PollMedia>,
+    /// Media attached to the explanation.
+    #[serde(
+        default,
+        alias = "explanationMedia",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub explanation_media: Option<PollMedia>,
     /// Seconds the poll stays open after creation.
     #[serde(default, alias = "openPeriod", skip_serializing_if = "Option::is_none")]
     pub open_period: Option<i64>,

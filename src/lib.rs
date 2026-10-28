@@ -32,6 +32,7 @@ pub mod edit;
 pub mod error;
 pub mod events;
 pub mod file;
+pub mod media;
 pub mod polling;
 pub mod retry;
 pub mod send;
@@ -64,6 +65,10 @@ pub use events::{
     ReactionType, ShippingAddress, ShippingQuery, BOT_API_VERSION,
 };
 pub use file::{File, GetFile, MAX_DOWNLOAD_BYTES};
+pub use media::{
+    Animation, Audio, Document, Link, LivePhoto, MaskPosition, PhotoSize, PollMedia, PollMediaKind,
+    Sticker, Venue, Video, VideoQuality,
+};
 pub use polling::{GetUpdates, UpdateCursor, MAX_UPDATES_LIMIT};
 pub use retry::{is_idempotent, NoDelay, RetryPolicy, Sleeper, ThreadSleeper};
 pub use send::{

@@ -54,11 +54,31 @@ optional fields can be present in any given update."*
 | `subscription` | BotSubscriptionUpdated | `Update::subscription` |
 | `stopped_message_generation` | MessageGenerationStopped | `Update::stopped_message_generation` |
 
+## `PollMedia`
+
+Quote, "PollMedia": *"At most one of the optional fields can be present in any
+given object."* The object is modelled as a flat set of ten optional fields,
+not as a tagged union.
+
+| Field | Type | Rust field |
+| --- | --- | --- |
+| `animation` | Animation | `PollMedia::animation` |
+| `audio` | Audio | `PollMedia::audio` |
+| `document` | Document | `PollMedia::document` |
+| `link` | Link | `PollMedia::link` |
+| `live_photo` | LivePhoto | `PollMedia::live_photo` |
+| `location` | Location | `PollMedia::location` |
+| `photo` | Array of PhotoSize | `PollMedia::photo` |
+| `sticker` | Sticker | `PollMedia::sticker` |
+| `venue` | Venue | `PollMedia::venue` |
+| `video` | Video | `PollMedia::video` |
+
+| Item | Value |
+| --- | --- |
+| Source URL | <https://core.telegram.org/bots/api> |
+| Fetched | 2026-10-27 |
+
 ## Known gaps (tracked, not hidden)
 
-- `PollMedia` (the `media` / `explanation_media` union of `Animation`, `Audio`,
-  `Document`, `Link`, `LivePhoto`, `Location`, `PhotoSize`, `Sticker`, `Venue`,
-  `Video`) is not modelled; the poll fields that carry it are absent from
-  `Poll`. Tracked in issue #16.
 - `Message` still models the subset the crate can act on (id, chat, sender,
   date, text, caption, thread id). The rest of the object is a known gap.
