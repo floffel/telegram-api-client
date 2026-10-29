@@ -5,13 +5,162 @@
 //! present, and Telegram documents that at most one is present per object.
 //! Every type here ignores unknown fields, so a newer Bot API cannot break
 //! parsing.
+//!
+//! Numeric members are non-negative by construction: sizes are `u64`, pixel
+//! dimensions are `u32`, durations are `u64`. A payload that carries a negative
+//! number is refused while parsing instead of being clamped into a
+//! plausible-looking value, so a malformed object can never masquerade as a
+//! valid one. The rejection names the member and reaches the caller as
+//! [`crate::Error::Payload`], the same typed error every undecodable body
+//! produces.
+//!
+//! ```
+//! use telegram_api_client::PhotoSize;
+//!
+//! let photo: PhotoSize = serde_json::from_str(r#"{"width":320,"height":240}"#).unwrap();
+//! assert_eq!(photo.width, 320);
+//!
+//! // `-1` is not repaired to `0`: nothing but a real count parses.
+//! assert!(serde_json::from_str::<PhotoSize>(r#"{"width":-1}"#).is_err());
+//! assert!(serde_json::from_str::<PhotoSize>(r#"{"file_size":-1}"#).is_err());
+//! ```
 
 use serde::{Deserialize, Serialize};
 
 use crate::events::Location;
 use crate::file::File;
 
+/// Why a numeric media member was refused while parsing.
+///
+/// The Bot API documents every size, dimension and duration as a non-negative
+/// integer. A negative number is therefore malformed input, not a value to
+/// repair: clamping `-1` to `0` would hand the caller a photo of no size and
+/// hide the defect. Deserialization fails instead, and the field name says which
+/// member was wrong.
+///
+/// The enum is [`non_exhaustive`](https://doc.rust-lang.org/reference/attributes/type_system.html#the-non_exhaustive-attribute):
+/// match with a `_` arm so new variants cannot break you.
+///
+/// ```
+/// use telegram_api_client::{MediaFieldError, PhotoSize, Sticker};
+///
+/// // The deserializer reports the member and the reason, it does not clamp.
+/// let error = serde_json::from_str::<Sticker>(r#"{"width":-1}"#)
+///     .expect_err("a negative width is rejected");
+/// assert!(error.to_string().contains("`width`"));
+/// assert!(error.to_string().contains("must not be negative"));
+///
+/// // Zero and the type maximum are boundaries, not errors.
+/// let narrow: PhotoSize = serde_json::from_str(r#"{"width":0,"height":0}"#)
+///     .expect("zero is a valid dimension");
+/// assert_eq!(narrow.width, 0);
+///
+/// // The type itself is public, so a caller can reject a value before parsing.
+/// let rejected = MediaFieldError::Negative { field: "file_size", value: -3 };
+/// assert_eq!(
+///     rejected.to_string(),
+///     "media field `file_size` must not be negative, got -3"
+/// );
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum MediaFieldError {
+    /// The member carried a negative number.
+    #[error("media field `{field}` must not be negative, got {value}")]
+    Negative {
+        /// Wire name of the offending member.
+        field: &'static str,
+        /// The rejected number.
+        value: i128,
+    },
+    /// The member carried a number that does not fit the member's type.
+    #[error("media field `{field}` is out of range, got {value}")]
+    OutOfRange {
+        /// Wire name of the offending member.
+        field: &'static str,
+        /// The rejected number.
+        value: u128,
+    },
+}
+
+/// Narrows a parsed integer to a non-negative field type.
+///
+/// Negative input is [`MediaFieldError::Negative`], too large input is
+/// [`MediaFieldError::OutOfRange`]; nothing is clamped.
+fn non_negative<T>(raw: i128, field: &'static str) -> Result<T, MediaFieldError>
+where
+    T: TryFrom<u128>,
+{
+    let value = u128::try_from(raw).map_err(|_| MediaFieldError::Negative { field, value: raw })?;
+    T::try_from(value).map_err(|_| MediaFieldError::OutOfRange { field, value })
+}
+
+/// Deserializes a pixel dimension into `u32`.
+///
+/// A negative number is refused with [`MediaFieldError::Negative`], a number above
+/// `u32::MAX` with [`MediaFieldError::OutOfRange`]; the bound is inclusive, so `0`
+/// and `u32::MAX` both pass.
+fn deserialize_width<'de, D>(deserializer: D) -> Result<u32, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = i128::deserialize(deserializer)?;
+    non_negative(raw, "width").map_err(serde::de::Error::custom)
+}
+
+/// Deserializes a pixel dimension into `u32`, see [`deserialize_width`].
+fn deserialize_height<'de, D>(deserializer: D) -> Result<u32, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = i128::deserialize(deserializer)?;
+    non_negative(raw, "height").map_err(serde::de::Error::custom)
+}
+
+/// Deserializes a duration in seconds into `u64`.
+///
+/// The bound is inclusive: `0` and `u64::MAX` pass, a negative number does not.
+fn deserialize_duration<'de, D>(deserializer: D) -> Result<u64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = i128::deserialize(deserializer)?;
+    non_negative(raw, "duration").map_err(serde::de::Error::custom)
+}
+
+/// Deserializes an optional byte count into `Option<u64>`.
+///
+/// An absent member and an explicit `null` both stay `None`; a present number is
+/// checked like [`deserialize_duration`].
+fn deserialize_file_size<'de, D>(deserializer: D) -> Result<Option<u64>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    match Option::<i128>::deserialize(deserializer)? {
+        Some(raw) => non_negative(raw, "file_size")
+            .map(Some)
+            .map_err(serde::de::Error::custom),
+        None => Ok(None),
+    }
+}
+
+/// Deserializes an optional cover timestamp in seconds into `Option<u64>`.
+fn deserialize_start_timestamp<'de, D>(deserializer: D) -> Result<Option<u64>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    match Option::<i128>::deserialize(deserializer)? {
+        Some(raw) => non_negative(raw, "start_timestamp")
+            .map(Some)
+            .map_err(serde::de::Error::custom),
+        None => Ok(None),
+    }
+}
+
 /// One size of a photo or thumbnail.
+///
+/// `width` and `height` are `u32`, `file_size` is `u64`: a negative number is
+/// refused while parsing, never clamped.
 ///
 /// ```
 /// use telegram_api_client::PhotoSize;
@@ -21,6 +170,21 @@ use crate::file::File;
 /// ).unwrap();
 /// assert_eq!(photo.width, 320);
 /// assert_eq!(photo.file_size, Some(12345));
+///
+/// // The boundaries: zero and the type maximum parse, `-1` does not.
+/// let empty: PhotoSize = serde_json::from_str(r#"{"width":0,"height":0,"file_size":0}"#).unwrap();
+/// assert_eq!(empty.file_size, Some(0));
+///
+/// let huge: PhotoSize = serde_json::from_str(
+///     r#"{"width":4294967295,"height":4294967295,"file_size":18446744073709551615}"#,
+/// ).unwrap();
+/// assert_eq!(huge.width, u32::MAX);
+/// assert_eq!(huge.file_size, Some(u64::MAX));
+///
+/// assert!(serde_json::from_str::<PhotoSize>(r#"{"width":-1}"#).is_err());
+/// assert!(serde_json::from_str::<PhotoSize>(r#"{"file_size":-1}"#).is_err());
+/// // A number that does not fit the member's type is an error too.
+/// assert!(serde_json::from_str::<PhotoSize>(r#"{"width":4294967296}"#).is_err());
 /// ```
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
 pub struct PhotoSize {
@@ -30,15 +194,20 @@ pub struct PhotoSize {
     /// Identifier stable across bots.
     #[serde(default, alias = "fileUniqueId")]
     pub file_unique_id: String,
-    /// Photo width in pixels.
-    #[serde(default)]
-    pub width: i64,
-    /// Photo height in pixels.
-    #[serde(default)]
-    pub height: i64,
-    /// Photo size in bytes, when known.
-    #[serde(default, alias = "fileSize", skip_serializing_if = "Option::is_none")]
-    pub file_size: Option<i64>,
+    /// Photo width in pixels; negative input is rejected.
+    #[serde(default, deserialize_with = "deserialize_width")]
+    pub width: u32,
+    /// Photo height in pixels; negative input is rejected.
+    #[serde(default, deserialize_with = "deserialize_height")]
+    pub height: u32,
+    /// Photo size in bytes, when known; negative input is rejected.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_file_size",
+        alias = "fileSize",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub file_size: Option<u64>,
 }
 
 /// An HTTP link attached to a poll or poll option.
@@ -58,6 +227,9 @@ pub struct Link {
 
 /// A live photo attached to a poll or poll option.
 ///
+/// Dimensions are `u32`, duration and size are `u64`; negative input is
+/// refused while parsing.
+///
 /// ```
 /// use telegram_api_client::LivePhoto;
 ///
@@ -65,6 +237,15 @@ pub struct Link {
 ///     r#"{"file_id":"A","file_unique_id":"u","width":1080,"height":1920,"duration":3}"#,
 /// ).unwrap();
 /// assert_eq!(live_photo.duration, 3);
+///
+/// // Boundaries: zero and the maximum parse, a negative number does not.
+/// let still: LivePhoto = serde_json::from_str(
+///     r#"{"width":0,"height":0,"duration":0,"file_size":18446744073709551615}"#,
+/// ).unwrap();
+/// assert_eq!(still.file_size, Some(u64::MAX));
+///
+/// assert!(serde_json::from_str::<LivePhoto>(r#"{"width":-1}"#).is_err());
+/// assert!(serde_json::from_str::<LivePhoto>(r#"{"duration":-1}"#).is_err());
 /// ```
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
 pub struct LivePhoto {
@@ -77,24 +258,32 @@ pub struct LivePhoto {
     /// Identifier stable across bots.
     #[serde(default, alias = "fileUniqueId")]
     pub file_unique_id: String,
-    /// Video width in pixels.
-    #[serde(default)]
-    pub width: i64,
-    /// Video height in pixels.
-    #[serde(default)]
-    pub height: i64,
-    /// Duration in seconds.
-    #[serde(default)]
-    pub duration: i64,
+    /// Video width in pixels; negative input is rejected.
+    #[serde(default, deserialize_with = "deserialize_width")]
+    pub width: u32,
+    /// Video height in pixels; negative input is rejected.
+    #[serde(default, deserialize_with = "deserialize_height")]
+    pub height: u32,
+    /// Duration in seconds; negative input is rejected.
+    #[serde(default, deserialize_with = "deserialize_duration")]
+    pub duration: u64,
     /// MIME type of the video, when known.
     #[serde(default, alias = "mimeType", skip_serializing_if = "Option::is_none")]
     pub mime_type: Option<String>,
-    /// File size in bytes, when known.
-    #[serde(default, alias = "fileSize", skip_serializing_if = "Option::is_none")]
-    pub file_size: Option<i64>,
+    /// File size in bytes, when known; negative input is rejected.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_file_size",
+        alias = "fileSize",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub file_size: Option<u64>,
 }
 
 /// An animation attached to a poll or poll option.
+///
+/// Dimensions are `u32`, duration and size are `u64`; negative input is
+/// refused while parsing.
 ///
 /// ```
 /// use telegram_api_client::Animation;
@@ -103,6 +292,17 @@ pub struct LivePhoto {
 ///     r#"{"file_id":"A","file_unique_id":"u","width":320,"height":240,"duration":2,"mime_type":"video/mp4"}"#,
 /// ).unwrap();
 /// assert_eq!(animation.mime_type.as_deref(), Some("video/mp4"));
+///
+/// // Boundaries: zero and the maximum parse, a negative number does not.
+/// let blank: Animation = serde_json::from_str(
+///     r#"{"width":0,"height":0,"duration":0,"file_size":0}"#,
+/// ).unwrap();
+/// assert_eq!(blank.file_size, Some(0));
+/// let widest: Animation = serde_json::from_str(r#"{"width":4294967295}"#).unwrap();
+/// assert_eq!(widest.width, u32::MAX);
+///
+/// assert!(serde_json::from_str::<Animation>(r#"{"height":-1}"#).is_err());
+/// assert!(serde_json::from_str::<Animation>(r#"{"file_size":-1}"#).is_err());
 /// ```
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
 pub struct Animation {
@@ -112,15 +312,15 @@ pub struct Animation {
     /// Identifier stable across bots.
     #[serde(default, alias = "fileUniqueId")]
     pub file_unique_id: String,
-    /// Animation width in pixels.
-    #[serde(default)]
-    pub width: i64,
-    /// Animation height in pixels.
-    #[serde(default)]
-    pub height: i64,
-    /// Duration in seconds.
-    #[serde(default)]
-    pub duration: i64,
+    /// Animation width in pixels; negative input is rejected.
+    #[serde(default, deserialize_with = "deserialize_width")]
+    pub width: u32,
+    /// Animation height in pixels; negative input is rejected.
+    #[serde(default, deserialize_with = "deserialize_height")]
+    pub height: u32,
+    /// Duration in seconds; negative input is rejected.
+    #[serde(default, deserialize_with = "deserialize_duration")]
+    pub duration: u64,
     /// Thumbnail of the animation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thumbnail: Option<PhotoSize>,
@@ -130,12 +330,20 @@ pub struct Animation {
     /// MIME type of the animation, when known.
     #[serde(default, alias = "mimeType", skip_serializing_if = "Option::is_none")]
     pub mime_type: Option<String>,
-    /// File size in bytes, when known.
-    #[serde(default, alias = "fileSize", skip_serializing_if = "Option::is_none")]
-    pub file_size: Option<i64>,
+    /// File size in bytes, when known; negative input is rejected.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_file_size",
+        alias = "fileSize",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub file_size: Option<u64>,
 }
 
 /// Audio attached to a poll or poll option.
+///
+/// `duration` is `u64`, `file_size` is `Option<u64>`; negative input is
+/// refused while parsing.
 ///
 /// ```
 /// use telegram_api_client::Audio;
@@ -144,6 +352,15 @@ pub struct Animation {
 ///     r#"{"file_id":"A","file_unique_id":"u","duration":9,"performer":"A","title":"T"}"#,
 /// ).unwrap();
 /// assert_eq!(audio.performer.as_deref(), Some("A"));
+///
+/// // Boundaries: zero and the maximum parse, a negative number does not.
+/// let silent: Audio = serde_json::from_str(
+///     r#"{"duration":0,"file_size":18446744073709551615}"#,
+/// ).unwrap();
+/// assert_eq!(silent.file_size, Some(u64::MAX));
+///
+/// assert!(serde_json::from_str::<Audio>(r#"{"duration":-1}"#).is_err());
+/// assert!(serde_json::from_str::<Audio>(r#"{"file_size":-1}"#).is_err());
 /// ```
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
 pub struct Audio {
@@ -153,9 +370,9 @@ pub struct Audio {
     /// Identifier stable across bots.
     #[serde(default, alias = "fileUniqueId")]
     pub file_unique_id: String,
-    /// Duration in seconds.
-    #[serde(default)]
-    pub duration: i64,
+    /// Duration in seconds; negative input is rejected.
+    #[serde(default, deserialize_with = "deserialize_duration")]
+    pub duration: u64,
     /// Performer, when known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub performer: Option<String>,
@@ -168,15 +385,22 @@ pub struct Audio {
     /// MIME type of the audio, when known.
     #[serde(default, alias = "mimeType", skip_serializing_if = "Option::is_none")]
     pub mime_type: Option<String>,
-    /// File size in bytes, when known.
-    #[serde(default, alias = "fileSize", skip_serializing_if = "Option::is_none")]
-    pub file_size: Option<i64>,
+    /// File size in bytes, when known; negative input is rejected.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_file_size",
+        alias = "fileSize",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub file_size: Option<u64>,
     /// Thumbnail of the audio.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thumbnail: Option<PhotoSize>,
 }
 
 /// A document attached to a poll or poll option.
+///
+/// `file_size` is `Option<u64>`; a negative size is refused while parsing.
 ///
 /// ```
 /// use telegram_api_client::Document;
@@ -185,6 +409,15 @@ pub struct Audio {
 ///     r#"{"file_id":"A","file_unique_id":"u","file_name":"a.pdf","mime_type":"application/pdf"}"#,
 /// ).unwrap();
 /// assert_eq!(document.file_name.as_deref(), Some("a.pdf"));
+///
+/// // Boundaries: an empty and an oversized file parse, a negative one does not.
+/// let empty: Document = serde_json::from_str(r#"{"file_size":0}"#).unwrap();
+/// assert_eq!(empty.file_size, Some(0));
+/// let largest: Document =
+///     serde_json::from_str(r#"{"file_size":18446744073709551615}"#).unwrap();
+/// assert_eq!(largest.file_size, Some(u64::MAX));
+///
+/// assert!(serde_json::from_str::<Document>(r#"{"file_size":-1}"#).is_err());
 /// ```
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
 pub struct Document {
@@ -203,9 +436,14 @@ pub struct Document {
     /// MIME type of the document, when known.
     #[serde(default, alias = "mimeType", skip_serializing_if = "Option::is_none")]
     pub mime_type: Option<String>,
-    /// File size in bytes, when known.
-    #[serde(default, alias = "fileSize", skip_serializing_if = "Option::is_none")]
-    pub file_size: Option<i64>,
+    /// File size in bytes, when known; negative input is rejected.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_file_size",
+        alias = "fileSize",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub file_size: Option<u64>,
 }
 
 /// A venue attached to a poll or poll option.
@@ -261,6 +499,9 @@ pub struct Venue {
 
 /// One encoded quality of a video.
 ///
+/// Dimensions are `u32`, `file_size` is `u64`; negative input is refused while
+/// parsing.
+///
 /// ```
 /// use telegram_api_client::VideoQuality;
 ///
@@ -268,6 +509,17 @@ pub struct Venue {
 ///     r#"{"file_id":"A","file_unique_id":"u","width":1280,"height":720,"codec":"h264"}"#,
 /// ).unwrap();
 /// assert_eq!(quality.codec, "h264");
+///
+/// // Boundaries: zero and the maximum parse, a negative number does not.
+/// let smallest: VideoQuality =
+///     serde_json::from_str(r#"{"width":0,"height":0,"file_size":0}"#).unwrap();
+/// assert_eq!(smallest.width, 0);
+/// let largest: VideoQuality =
+///     serde_json::from_str(r#"{"width":4294967295,"height":4294967295}"#).unwrap();
+/// assert_eq!(largest.height, u32::MAX);
+///
+/// assert!(serde_json::from_str::<VideoQuality>(r#"{"width":-1}"#).is_err());
+/// assert!(serde_json::from_str::<VideoQuality>(r#"{"file_size":-1}"#).is_err());
 /// ```
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
 pub struct VideoQuality {
@@ -277,21 +529,29 @@ pub struct VideoQuality {
     /// Identifier stable across bots.
     #[serde(default, alias = "fileUniqueId")]
     pub file_unique_id: String,
-    /// Video width in pixels.
-    #[serde(default)]
-    pub width: i64,
-    /// Video height in pixels.
-    #[serde(default)]
-    pub height: i64,
+    /// Video width in pixels; negative input is rejected.
+    #[serde(default, deserialize_with = "deserialize_width")]
+    pub width: u32,
+    /// Video height in pixels; negative input is rejected.
+    #[serde(default, deserialize_with = "deserialize_height")]
+    pub height: u32,
     /// Video codec.
     #[serde(default)]
     pub codec: String,
-    /// File size in bytes, when known.
-    #[serde(default, alias = "fileSize", skip_serializing_if = "Option::is_none")]
-    pub file_size: Option<i64>,
+    /// File size in bytes, when known; negative input is rejected.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_file_size",
+        alias = "fileSize",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub file_size: Option<u64>,
 }
 
 /// A video attached to a poll or poll option.
+///
+/// Dimensions are `u32`; duration, `start_timestamp` and `file_size` are `u64`.
+/// Negative input is refused while parsing.
 ///
 /// ```
 /// use telegram_api_client::Video;
@@ -300,6 +560,18 @@ pub struct VideoQuality {
 ///     r#"{"file_id":"A","file_unique_id":"u","width":1280,"height":720,"duration":12}"#,
 /// ).unwrap();
 /// assert_eq!(video.duration, 12);
+///
+/// // Boundaries: zero and the maximum parse, a negative number does not.
+/// let smallest: Video = serde_json::from_str(
+///     r#"{"width":0,"height":0,"duration":0,"start_timestamp":0,"file_size":0}"#,
+/// ).unwrap();
+/// assert_eq!(smallest.start_timestamp, Some(0));
+/// let longest: Video =
+///     serde_json::from_str(r#"{"duration":18446744073709551615}"#).unwrap();
+/// assert_eq!(longest.duration, u64::MAX);
+///
+/// assert!(serde_json::from_str::<Video>(r#"{"width":-1}"#).is_err());
+/// assert!(serde_json::from_str::<Video>(r#"{"start_timestamp":-1}"#).is_err());
 /// ```
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
 pub struct Video {
@@ -309,28 +581,30 @@ pub struct Video {
     /// Identifier stable across bots.
     #[serde(default, alias = "fileUniqueId")]
     pub file_unique_id: String,
-    /// Video width in pixels.
-    #[serde(default)]
-    pub width: i64,
-    /// Video height in pixels.
-    #[serde(default)]
-    pub height: i64,
-    /// Duration in seconds.
-    #[serde(default)]
-    pub duration: i64,
+    /// Video width in pixels; negative input is rejected.
+    #[serde(default, deserialize_with = "deserialize_width")]
+    pub width: u32,
+    /// Video height in pixels; negative input is rejected.
+    #[serde(default, deserialize_with = "deserialize_height")]
+    pub height: u32,
+    /// Duration in seconds; negative input is rejected.
+    #[serde(default, deserialize_with = "deserialize_duration")]
+    pub duration: u64,
     /// Thumbnail of the video.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thumbnail: Option<PhotoSize>,
     /// Covers available for the video.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cover: Option<Vec<PhotoSize>>,
-    /// Timestamp of the cover in the video, when known.
+    /// Timestamp of the cover in the video, when known; negative input is
+    /// rejected.
     #[serde(
         default,
+        deserialize_with = "deserialize_start_timestamp",
         alias = "startTimestamp",
         skip_serializing_if = "Option::is_none"
     )]
-    pub start_timestamp: Option<i64>,
+    pub start_timestamp: Option<u64>,
     /// Available encoded qualities.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub qualities: Option<Vec<VideoQuality>>,
@@ -340,9 +614,14 @@ pub struct Video {
     /// MIME type of the video, when known.
     #[serde(default, alias = "mimeType", skip_serializing_if = "Option::is_none")]
     pub mime_type: Option<String>,
-    /// File size in bytes, when known.
-    #[serde(default, alias = "fileSize", skip_serializing_if = "Option::is_none")]
-    pub file_size: Option<i64>,
+    /// File size in bytes, when known; negative input is rejected.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_file_size",
+        alias = "fileSize",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub file_size: Option<u64>,
 }
 
 /// Where a mask is positioned on a sticker face.
@@ -386,6 +665,9 @@ impl Eq for MaskPosition {}
 
 /// A sticker attached to a poll or poll option.
 ///
+/// Dimensions are `u32`, `file_size` is `u64`; negative input is refused while
+/// parsing.
+///
 /// ```
 /// use telegram_api_client::Sticker;
 ///
@@ -393,6 +675,17 @@ impl Eq for MaskPosition {}
 ///     r#"{"file_id":"CAAC","file_unique_id":"AQAD","type":"regular","width":512,"height":512,"is_animated":false,"is_video":false}"#,
 /// ).unwrap();
 /// assert_eq!(sticker.sticker_type, "regular");
+///
+/// // Boundaries: zero and the maximum parse, a negative number does not.
+/// let empty: Sticker =
+///     serde_json::from_str(r#"{"width":0,"height":0,"file_size":0}"#).unwrap();
+/// assert_eq!(empty.file_size, Some(0));
+/// let biggest: Sticker =
+///     serde_json::from_str(r#"{"width":4294967295,"height":4294967295}"#).unwrap();
+/// assert_eq!(biggest.width, u32::MAX);
+///
+/// assert!(serde_json::from_str::<Sticker>(r#"{"height":-1}"#).is_err());
+/// assert!(serde_json::from_str::<Sticker>(r#"{"file_size":-1}"#).is_err());
 /// ```
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
 pub struct Sticker {
@@ -402,12 +695,12 @@ pub struct Sticker {
     /// Identifier stable across bots.
     #[serde(default, alias = "fileUniqueId")]
     pub file_unique_id: String,
-    /// Sticker width in pixels.
-    #[serde(default)]
-    pub width: i64,
-    /// Sticker height in pixels.
-    #[serde(default)]
-    pub height: i64,
+    /// Sticker width in pixels; negative input is rejected.
+    #[serde(default, deserialize_with = "deserialize_width")]
+    pub width: u32,
+    /// Sticker height in pixels; negative input is rejected.
+    #[serde(default, deserialize_with = "deserialize_height")]
+    pub height: u32,
     /// Whether the sticker is animated.
     #[serde(default, alias = "isAnimated")]
     pub is_animated: bool,
@@ -454,9 +747,14 @@ pub struct Sticker {
         skip_serializing_if = "Option::is_none"
     )]
     pub needs_repainting: Option<bool>,
-    /// File size in bytes, when known.
-    #[serde(default, alias = "fileSize", skip_serializing_if = "Option::is_none")]
-    pub file_size: Option<i64>,
+    /// File size in bytes, when known; negative input is rejected.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_file_size",
+        alias = "fileSize",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub file_size: Option<u64>,
 }
 
 /// The media attached to a poll question, explanation or option.
