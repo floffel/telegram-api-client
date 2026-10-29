@@ -673,6 +673,28 @@ fn a_negative_member_surfaces_as_a_payload_error() {
 }
 
 #[test]
+fn a_negative_poll_option_member_is_a_payload_error_that_names_the_member() {
+    // The webhook is the real entry point: a negative member deep inside a poll
+    // option's media cannot be decoded, so it must surface as `Error::Payload`
+    // with the offending member named in both the message and the source.
+    let guard = WebhookGuard::new("s3cret").expect("a non-empty secret");
+    let body = br#"{"update_id":1,"poll":{"options":[{"text":"a","media":{"photo":[{"file_id":"A","fileSize":-1}]}}]}}"#;
+
+    let error = guard
+        .verify_and_parse(Some("s3cret"), guard.derived_path(), body)
+        .expect_err("a negative file size cannot be decoded");
+
+    match error {
+        Error::Payload { message, source } => {
+            assert!(message.contains("`file_size`"), "{message}");
+            let source = source.expect("the parser error is kept as the source");
+            assert!(source.to_string().contains("`file_size`"), "{source}");
+        }
+        other => panic!("expected Error::Payload, got {other:?}"),
+    }
+}
+
+#[test]
 fn the_bounds_survive_a_round_trip() {
     let video = Video {
         width: u32::MAX,

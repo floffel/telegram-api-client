@@ -66,8 +66,8 @@ pub use events::{
 };
 pub use file::{File, GetFile, MAX_DOWNLOAD_BYTES};
 pub use media::{
-    Animation, Audio, Document, Link, LivePhoto, MaskPosition, MediaFieldError, PhotoSize,
-    PollMedia, PollMediaKind, Sticker, Venue, Video, VideoQuality,
+    Animation, Audio, Document, Link, LivePhoto, MaskPosition, PhotoSize, PollMedia, PollMediaKind,
+    Sticker, Venue, Video, VideoQuality,
 };
 pub use polling::{GetUpdates, UpdateCursor, MAX_UPDATES_LIMIT};
 pub use retry::{is_idempotent, NoDelay, RetryPolicy, Sleeper, ThreadSleeper};

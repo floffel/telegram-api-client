@@ -38,33 +38,12 @@ use crate::file::File;
 /// hide the defect. Deserialization fails instead, and the field name says which
 /// member was wrong.
 ///
-/// The enum is [`non_exhaustive`](https://doc.rust-lang.org/reference/attributes/type_system.html#the-non_exhaustive-attribute):
-/// match with a `_` arm so new variants cannot break you.
-///
-/// ```
-/// use telegram_api_client::{MediaFieldError, PhotoSize, Sticker};
-///
-/// // The deserializer reports the member and the reason, it does not clamp.
-/// let error = serde_json::from_str::<Sticker>(r#"{"width":-1}"#)
-///     .expect_err("a negative width is rejected");
-/// assert!(error.to_string().contains("`width`"));
-/// assert!(error.to_string().contains("must not be negative"));
-///
-/// // Zero and the type maximum are boundaries, not errors.
-/// let narrow: PhotoSize = serde_json::from_str(r#"{"width":0,"height":0}"#)
-///     .expect("zero is a valid dimension");
-/// assert_eq!(narrow.width, 0);
-///
-/// // The type itself is public, so a caller can reject a value before parsing.
-/// let rejected = MediaFieldError::Negative { field: "file_size", value: -3 };
-/// assert_eq!(
-///     rejected.to_string(),
-///     "media field `file_size` must not be negative, got -3"
-/// );
-/// ```
+/// Deliberately private. No public path returns this type: [`non_negative`]
+/// renders it into the deserializer, so a caller sees the member name in
+/// [`crate::Error::Payload`] — the same typed error every undecodable body
+/// produces — and not a second, unused error surface.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
-#[non_exhaustive]
-pub enum MediaFieldError {
+enum MediaFieldError {
     /// The member carried a negative number.
     #[error("media field `{field}` must not be negative, got {value}")]
     Negative {
@@ -85,8 +64,9 @@ pub enum MediaFieldError {
 
 /// Narrows a parsed integer to a non-negative field type.
 ///
-/// Negative input is [`MediaFieldError::Negative`], too large input is
-/// [`MediaFieldError::OutOfRange`]; nothing is clamped.
+/// A negative number is refused as "must not be negative", a number too large
+/// for `T` as "is out of range"; both messages name `field`, and nothing is
+/// clamped.
 fn non_negative<T>(raw: i128, field: &'static str) -> Result<T, MediaFieldError>
 where
     T: TryFrom<u128>,
@@ -97,9 +77,8 @@ where
 
 /// Deserializes a pixel dimension into `u32`.
 ///
-/// A negative number is refused with [`MediaFieldError::Negative`], a number above
-/// `u32::MAX` with [`MediaFieldError::OutOfRange`]; the bound is inclusive, so `0`
-/// and `u32::MAX` both pass.
+/// A negative number and a number above `u32::MAX` are both refused; the bound
+/// is inclusive, so `0` and `u32::MAX` pass.
 fn deserialize_width<'de, D>(deserializer: D) -> Result<u32, D::Error>
 where
     D: serde::Deserializer<'de>,
