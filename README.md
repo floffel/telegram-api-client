@@ -291,8 +291,11 @@ compiling and fails loudly instead of silently dropping the file.
   `Error::InvalidRequest { field, .. }` — no network call.
 - **429 is first class.** `Error::RateLimited { retry_after, .. }` keeps
   Telegram's `parameters.retry_after`; if only the description carries the hint
-  it is parsed out. `RetryPolicy::delay_for_error` prefers that hint over its own
-  exponential curve.
+  it is parsed out, case-insensitively, from a scan that allocates nothing and is
+  bounded twice (`MAX_RETRY_HINT_SCAN_BYTES`, 20 significant digits). A hint of
+  `0` from either source means "no hint", never "retry immediately".
+  `RetryPolicy::delay_for_error` prefers that hint over its own exponential curve
+  and hands the error back instead of shortening a hint longer than `max_delay`.
 - **Secrets.** The bot token never appears in `Debug` (`TelegramClient`,
   `SetWebhook`), comparisons are constant time (`subtle`), and an empty
   configured secret is a hard error rather than a wildcard.
