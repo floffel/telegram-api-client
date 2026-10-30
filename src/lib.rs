@@ -55,7 +55,7 @@ pub use edit::{
     CopyMessage, DeleteMessage, EditMessageCaption, EditMessageMedia, EditMessageReplyMarkup,
     EditMessageText, EditResult, EditTarget, ForwardMessage, MessageId,
 };
-pub use error::{parse_retry_after, Error, Result};
+pub use error::{parse_retry_after, Error, Result, MAX_RETRY_HINT_SCAN_BYTES};
 pub use events::{
     BotSubscriptionUpdated, BusinessBotRights, BusinessConnection, BusinessMessagesDeleted,
     ChatBoost, ChatBoostRemoved, ChatBoostSource, ChatBoostUpdated, ChatInviteLink,

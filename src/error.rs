@@ -337,6 +337,11 @@ impl Error {
 
     /// How long Telegram asked us to wait, if it said so explicitly.
     ///
+    /// The number is the one the server wrote, unclamped: a hint longer than
+    /// [`crate::RetryPolicy::max_delay`] stays that long, and it is the policy -
+    /// not this accessor - that decides not to retry. A `0` never gets here; see
+    /// [`parse_retry_after`] for why a zero wait is treated as no hint.
+    ///
     /// ```
     /// use telegram_api_client::Error;
     ///
@@ -384,10 +389,16 @@ impl Error {
 
         let is_rate_limited = code == Some(429) || http_status == Some(429);
         if is_rate_limited {
+            // A zero hint is no hint. It is the shape that says "the budget is
+            // exhausted", and retrying with no wait is exactly what burns the
+            // attempt budget. Both hint sources go through the same filter, so an
+            // explicit `0` falls back to the description just like an absent
+            // field does (issue #42).
             let explicit = body
                 .get("parameters")
                 .and_then(|parameters| parameters.get("retry_after"))
-                .and_then(Value::as_u64);
+                .and_then(Value::as_u64)
+                .and_then(usable_retry_after);
             let retry_after =
                 explicit.or_else(|| description.as_deref().and_then(parse_retry_after));
             return Some(Self::RateLimited {
@@ -410,16 +421,81 @@ impl Error {
     }
 }
 
+/// Longest description prefix [`parse_retry_after`] will look at.
+///
+/// The description arrives from a remote endpoint, so its length is not ours to
+/// trust: capping the scan turns it into a fixed work budget. The Bot API writes
+/// its hint into a single short sentence, so nothing real lives beyond this
+/// window, and a marker after byte 512 is not treated as a hint.
+///
+/// ```
+/// use telegram_api_client::{parse_retry_after, MAX_RETRY_HINT_SCAN_BYTES};
+///
+/// // A marker that starts inside the window is read ...
+/// let inside = "x".repeat(MAX_RETRY_HINT_SCAN_BYTES - "retry after 5".len());
+/// assert_eq!(parse_retry_after(&format!("{inside}retry after 5")), Some(5));
+///
+/// // ... one that starts past it is not, however long the description gets.
+/// let outside = "x".repeat(MAX_RETRY_HINT_SCAN_BYTES);
+/// assert_eq!(parse_retry_after(&format!("{outside}retry after 5")), None);
+/// ```
+pub const MAX_RETRY_HINT_SCAN_BYTES: usize = 512;
+
+/// Longest run of digits a hint may have.
+///
+/// `u64` holds 20 decimal digits. A longer run cannot be a wait in seconds, so it
+/// is rejected instead of being accumulated with an unbounded amount of work.
+const MAX_RETRY_HINT_DIGITS: usize = 20;
+
+/// Whether a wait in seconds is worth handing to a caller.
+///
+/// `0` is well formed and means "immediately", which as a hint is
+/// indistinguishable from no hint at all - a loop that waits nothing and calls
+/// again is exactly what the server asked us not to do. Every other value passes
+/// through unchanged: the hint is authoritative and is never clamped here, so one
+/// longer than [`crate::RetryPolicy::max_delay`] still reaches the caller.
+fn usable_retry_after(seconds: u64) -> Option<u64> {
+    (seconds > 0).then_some(seconds)
+}
+
+/// Case-insensitive ASCII search that allocates nothing.
+///
+/// Lowercasing the whole description and searching that copy is what made the old
+/// parser allocate in proportion to caller-controlled input (issue #43). ASCII
+/// lowercasing changes ASCII bytes only and never changes lengths, so a windowed
+/// byte comparison finds exactly the same offset without a copy. The needles are
+/// ASCII, so a multi-byte UTF-8 sequence in the haystack can never match one.
+fn find_ascii_ignore_case(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    if needle.is_empty() {
+        return None;
+    }
+    haystack
+        .windows(needle.len())
+        .position(|window| window.eq_ignore_ascii_case(needle))
+}
+
+/// The part of `description` that may carry a hint, cut on a char boundary.
+fn scan_window(description: &str) -> &str {
+    let mut end = description.len().min(MAX_RETRY_HINT_SCAN_BYTES);
+    while !description.is_char_boundary(end) {
+        end -= 1;
+    }
+    &description[..end]
+}
+
 /// Extracts the number of seconds from a Bot API description.
 ///
 /// Telegram writes the hint in two shapes: `"Too Many Requests: retry after
 /// 12"` / `"retry_after 12"` on the modern path, and `"Flood control exceeded.
-/// Retry in 12 seconds"` for flood control. All three markers are recognised;
-/// the leftmost one wins, so a description that mentions both is read in the
-/// order Telegram wrote it.
+/// Retry in 12 seconds"` for flood control. All three markers are recognised,
+/// case-insensitively; the leftmost one wins, so a description that mentions both
+/// is read in the order Telegram wrote it.
 ///
-/// Returns `None` when there is no marker, no positive number after it, or a
-/// number that does not fit in `u64`.
+/// Returns `None` when there is no marker, no number after it, a zero, or a
+/// number too wide for `u64`. The scan is bounded twice - at most
+/// [`MAX_RETRY_HINT_SCAN_BYTES`] bytes of description and at most 20 digits - and
+/// allocates nothing, so a hostile description costs a fixed amount of work per
+/// call instead of memory proportional to its length.
 ///
 /// ```rust
 /// use telegram_api_client::parse_retry_after;
@@ -428,12 +504,16 @@ impl Error {
 /// assert_eq!(parse_retry_after("retry_after 7"), Some(7));
 /// assert_eq!(parse_retry_after("Flood control exceeded. Retry in 9s"), Some(9));
 /// assert_eq!(parse_retry_after("Flood control exceeded. Retry in 12 seconds"), Some(12));
+/// assert_eq!(parse_retry_after("RETRY AFTER: = 3"), Some(3));
 ///
 /// // No marker, no number, zero or out of range: no usable hint.
 /// assert_eq!(parse_retry_after("no digits here"), None);
 /// assert_eq!(parse_retry_after("Retry in "), None);
 /// assert_eq!(parse_retry_after("Retry in 0s"), None);
 /// assert_eq!(parse_retry_after("Retry in 99999999999999999999s"), None);
+///
+/// // The widest hint a `u64` can hold is still a hint.
+/// assert_eq!(parse_retry_after("retry after 18446744073709551615"), Some(u64::MAX));
 /// ```
 #[must_use]
 pub fn parse_retry_after(description: &str) -> Option<u64> {
@@ -441,14 +521,50 @@ pub fn parse_retry_after(description: &str) -> Option<u64> {
     /// match wins.
     const MARKERS: [&str; 3] = ["retry after", "retry_after", "retry in"];
 
-    let lower = description.to_ascii_lowercase();
-    let (index, marker) = MARKERS
+    let bytes = scan_window(description).as_bytes();
+    let (index, marker_len) = MARKERS
         .iter()
-        .filter_map(|needle| lower.find(needle).map(|index| (index, *needle)))
+        .filter_map(|needle| {
+            find_ascii_ignore_case(bytes, needle.as_bytes()).map(|index| (index, needle.len()))
+        })
         .min_by_key(|(index, _)| *index)?;
-    let rest = lower[index + marker.len()..].trim_start_matches([' ', '\t', ':', '=']);
-    let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
-    digits.parse::<u64>().ok().filter(|seconds| *seconds > 0)
+
+    let mut rest = &bytes[index + marker_len..];
+    while let Some((first, tail)) = rest.split_first() {
+        if matches!(*first, b' ' | b'\t' | b':' | b'=') {
+            rest = tail;
+        } else {
+            break;
+        }
+    }
+
+    let width = rest.iter().take_while(|byte| byte.is_ascii_digit()).count();
+    if width == 0 {
+        return None;
+    }
+
+    // Leading zeros are padding, not a larger number: they do not count towards
+    // the width, so `0000...5` still reads as 5 instead of being rejected as an
+    // over-long run. The run itself stays bounded by the scan window, so a
+    // megabyte of zeros costs the same as a short description.
+    let mut significant = &rest[..width];
+    while let Some((first, tail)) = significant.split_first() {
+        if *first == b'0' {
+            significant = tail;
+        } else {
+            break;
+        }
+    }
+    if significant.len() > MAX_RETRY_HINT_DIGITS {
+        return None;
+    }
+    let mut seconds: u64 = 0;
+    for byte in significant {
+        seconds = seconds
+            .checked_mul(10)?
+            .checked_add(u64::from(byte - b'0'))?;
+    }
+    usable_retry_after(seconds)
 }
 
 /// Convenience alias.
