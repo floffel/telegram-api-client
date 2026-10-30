@@ -6,6 +6,28 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html); what that
 means for this API is spelled out in the README under
 [Versioning and MSRV](README.md#versioning-msrv-and-changelog).
 
+## [Unreleased]
+
+### Fixed
+
+- **A zero `parameters.retry_after` is no longer a hint** (#42). A 429 carrying
+  `"retry_after": 0` became `RateLimited { retry_after: Some(0) }`, which shadowed
+  a perfectly good textual hint ("Too Many Requests: retry after 6") and let
+  `RetryPolicy` retry with no wait at all until the attempt budget ran out. Both
+  hint sources now go through one filter: a zero is an absent hint, and the
+  description is consulted instead - exactly like a missing field.
+- **Retry-hint parsing no longer allocates in proportion to its input** (#43).
+  `parse_retry_after` copied the whole description to lowercase it and collected
+  the digits into a second `String`, so a megabyte-long description from a hostile
+  endpoint cost a megabyte of allocations per 429. The scan is now allocation-free
+  and bounded twice: `MAX_RETRY_HINT_SCAN_BYTES` (512) bytes of description and 20
+  significant digits (leading zeros do not count). Both limits are tested on both
+  sides, and the scan window is cut on a char boundary so a multi-byte character
+  straddling it cannot panic.
+- The reported hint stays **unclamped**: a `retry_after` longer than
+  `RetryPolicy::max_delay` is still handed to the caller unchanged, because
+  shortening a server hint is how a retry loop walks into a second 429.
+
 ## [0.1.8] - 2026-10-28
 
 ### Added

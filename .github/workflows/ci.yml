@@ -57,7 +57,7 @@ jobs:
       - run: cargo check --all-targets --all-features
       - run: cargo check --no-default-features
 
-  # The three fuzz targets are a gate, not a nightly chore: a target that stops
+  # The four fuzz targets are a gate, not a nightly chore: a target that stops
   # compiling, or starts panicking on its seed corpus, turns this job red.
   fuzz:
     runs-on: ubuntu-latest
@@ -86,7 +86,7 @@ jobs:
         working-directory: fuzz
         run: |
           set -e
-          for target in update webhook multipart; do
+          for target in update webhook multipart retry_hint; do
             echo "::group::$target"
             cargo fuzz run "$target" "seeds/$target" -- -max_total_time=20 -rss_limit_mb=2048
             echo "::endgroup::"
