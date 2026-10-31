@@ -555,7 +555,7 @@ fn error_helpers_cover_the_edges() {
     assert!(with_source.is_ambiguous());
     assert!(std::error::Error::source(&with_source).is_some());
 
-    // A non-Ambiguous error ignores the source attachment.
+    // A variant without a source slot ignores the attachment (issue #41).
     let api = Error::Api {
         code: 400,
         description: "nope".into(),
