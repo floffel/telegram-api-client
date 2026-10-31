@@ -395,3 +395,444 @@ fn camel_case_members_are_tolerated() {
         Some(PollMediaKind::Document)
     );
 }
+
+// ---------------------------------------------------------------------------
+// Numeric members are non-negative (issue #60).
+//
+// Every size, duration and dimension the Bot API sends is a count. Before the
+// fix these fields were `i64`, so `-1` deserialized and serialized happily and
+// produced media objects Telegram would never send.
+// ---------------------------------------------------------------------------
+
+use telegram_api_client::{Error, VideoQuality, WebhookGuard};
+
+/// Declares one bounded numeric member: `-1` must be refused with an error that
+/// names the member, `0` and the type maximum must parse.
+macro_rules! bounded_member {
+    ($name:ident, $ty:ty, $template:literal, $field:literal, $max:ident) => {
+        #[test]
+        fn $name() {
+            let parse = |value: &str| -> Result<$ty, serde_json::Error> {
+                serde_json::from_str(&$template.replace("{v}", value))
+            };
+
+            // Just outside the range: refused, and the error names the member.
+            let refused = parse("-1").expect_err("a negative count must not parse");
+            assert!(
+                refused.to_string().contains(&format!("`{}`", $field)),
+                "the rejection names `{}`: {refused}",
+                $field
+            );
+
+            // Just inside both ends of the range: accepted.
+            assert!(parse("0").is_ok(), "0 is the inclusive lower bound");
+            assert!(parse($max).is_ok(), "{} is the inclusive upper bound", $max);
+        }
+    };
+}
+
+/// `u32::MAX` as it arrives on the wire.
+const WIRE_U32_MAX: &str = "4294967295";
+/// `u64::MAX` as it arrives on the wire.
+const WIRE_U64_MAX: &str = "18446744073709551615";
+
+bounded_member!(
+    photo_size_width_is_non_negative,
+    PhotoSize,
+    r#"{"width":{v}}"#,
+    "width",
+    WIRE_U32_MAX
+);
+bounded_member!(
+    photo_size_height_is_non_negative,
+    PhotoSize,
+    r#"{"height":{v}}"#,
+    "height",
+    WIRE_U32_MAX
+);
+bounded_member!(
+    photo_size_file_size_is_non_negative,
+    PhotoSize,
+    r#"{"file_size":{v}}"#,
+    "file_size",
+    WIRE_U64_MAX
+);
+
+bounded_member!(
+    live_photo_width_is_non_negative,
+    LivePhoto,
+    r#"{"width":{v}}"#,
+    "width",
+    WIRE_U32_MAX
+);
+bounded_member!(
+    live_photo_height_is_non_negative,
+    LivePhoto,
+    r#"{"height":{v}}"#,
+    "height",
+    WIRE_U32_MAX
+);
+bounded_member!(
+    live_photo_duration_is_non_negative,
+    LivePhoto,
+    r#"{"duration":{v}}"#,
+    "duration",
+    WIRE_U64_MAX
+);
+bounded_member!(
+    live_photo_file_size_is_non_negative,
+    LivePhoto,
+    r#"{"file_size":{v}}"#,
+    "file_size",
+    WIRE_U64_MAX
+);
+
+bounded_member!(
+    animation_width_is_non_negative,
+    Animation,
+    r#"{"width":{v}}"#,
+    "width",
+    WIRE_U32_MAX
+);
+bounded_member!(
+    animation_height_is_non_negative,
+    Animation,
+    r#"{"height":{v}}"#,
+    "height",
+    WIRE_U32_MAX
+);
+bounded_member!(
+    animation_duration_is_non_negative,
+    Animation,
+    r#"{"duration":{v}}"#,
+    "duration",
+    WIRE_U64_MAX
+);
+bounded_member!(
+    animation_file_size_is_non_negative,
+    Animation,
+    r#"{"file_size":{v}}"#,
+    "file_size",
+    WIRE_U64_MAX
+);
+
+bounded_member!(
+    audio_duration_is_non_negative,
+    Audio,
+    r#"{"duration":{v}}"#,
+    "duration",
+    WIRE_U64_MAX
+);
+bounded_member!(
+    audio_file_size_is_non_negative,
+    Audio,
+    r#"{"file_size":{v}}"#,
+    "file_size",
+    WIRE_U64_MAX
+);
+
+bounded_member!(
+    document_file_size_is_non_negative,
+    Document,
+    r#"{"file_size":{v}}"#,
+    "file_size",
+    WIRE_U64_MAX
+);
+
+bounded_member!(
+    video_quality_width_is_non_negative,
+    VideoQuality,
+    r#"{"width":{v}}"#,
+    "width",
+    WIRE_U32_MAX
+);
+bounded_member!(
+    video_quality_height_is_non_negative,
+    VideoQuality,
+    r#"{"height":{v}}"#,
+    "height",
+    WIRE_U32_MAX
+);
+bounded_member!(
+    video_quality_file_size_is_non_negative,
+    VideoQuality,
+    r#"{"file_size":{v}}"#,
+    "file_size",
+    WIRE_U64_MAX
+);
+
+bounded_member!(
+    video_width_is_non_negative,
+    Video,
+    r#"{"width":{v}}"#,
+    "width",
+    WIRE_U32_MAX
+);
+bounded_member!(
+    video_height_is_non_negative,
+    Video,
+    r#"{"height":{v}}"#,
+    "height",
+    WIRE_U32_MAX
+);
+bounded_member!(
+    video_duration_is_non_negative,
+    Video,
+    r#"{"duration":{v}}"#,
+    "duration",
+    WIRE_U64_MAX
+);
+bounded_member!(
+    video_start_timestamp_is_non_negative,
+    Video,
+    r#"{"start_timestamp":{v}}"#,
+    "start_timestamp",
+    WIRE_U64_MAX
+);
+bounded_member!(
+    video_file_size_is_non_negative,
+    Video,
+    r#"{"file_size":{v}}"#,
+    "file_size",
+    WIRE_U64_MAX
+);
+
+bounded_member!(
+    sticker_width_is_non_negative,
+    Sticker,
+    r#"{"width":{v}}"#,
+    "width",
+    WIRE_U32_MAX
+);
+bounded_member!(
+    sticker_height_is_non_negative,
+    Sticker,
+    r#"{"height":{v}}"#,
+    "height",
+    WIRE_U32_MAX
+);
+bounded_member!(
+    sticker_file_size_is_non_negative,
+    Sticker,
+    r#"{"file_size":{v}}"#,
+    "file_size",
+    WIRE_U64_MAX
+);
+
+#[test]
+fn dimensions_above_u32_max_are_rejected_not_truncated() {
+    let refused = serde_json::from_str::<PhotoSize>(r#"{"width":4294967296}"#)
+        .expect_err("a width that does not fit u32 must not parse");
+    assert!(
+        refused.to_string().contains("`width`"),
+        "the rejection names the member: {refused}"
+    );
+    assert!(serde_json::from_str::<Sticker>(r#"{"height":4294967296}"#).is_err());
+}
+
+#[test]
+fn camel_case_sizes_are_validated_too() {
+    assert!(serde_json::from_str::<Document>(r#"{"fileSize":0}"#).is_ok());
+    let refused = serde_json::from_str::<Document>(r#"{"fileSize":-1}"#)
+        .expect_err("the camelCase alias is the same member and is checked too");
+    assert!(refused.to_string().contains("file_size"));
+}
+
+#[test]
+fn missing_and_unknown_members_keep_their_defaults() {
+    let photo: PhotoSize = serde_json::from_str(r#"{"width":320,"future_member":"x"}"#)
+        .expect("an unknown member is still ignored");
+    assert_eq!(photo.width, 320);
+    assert_eq!(photo.height, 0, "an absent dimension defaults to zero");
+    assert_eq!(photo.file_size, None, "an absent size stays unknown");
+}
+
+#[test]
+fn a_negative_member_inside_poll_media_is_rejected() {
+    let refused = serde_json::from_str::<Poll>(
+        r#"{"media":{"photo":[{"file_id":"A","width":320,"file_size":-1}]}}"#,
+    )
+    .expect_err("the wire path through PollMedia is validated as well");
+    assert!(refused.to_string().contains("file_size"), "{refused}");
+}
+
+#[test]
+fn a_negative_member_surfaces_as_a_payload_error() {
+    // `-1` never reaches the caller as a value: the webhook parser maps the
+    // serde rejection to `Error::Payload`, like every other undecodable body.
+    let guard = WebhookGuard::new("s3cret").expect("a non-empty secret");
+    let body = br#"{"update_id":1,"poll":{"media":{"photo":[{"file_id":"A","width":-1}]}}}"#;
+
+    let error = guard
+        .verify_and_parse(Some("s3cret"), guard.derived_path(), body)
+        .expect_err("a negative width cannot be decoded");
+
+    assert!(matches!(error, Error::Payload { .. }), "{error:?}");
+    let message = error.to_string();
+    assert!(message.contains("`width`"), "{message}");
+}
+
+#[test]
+fn a_negative_poll_option_member_is_a_payload_error_that_names_the_member() {
+    // The webhook is the real entry point: a negative member deep inside a poll
+    // option's media cannot be decoded, so it must surface as `Error::Payload`
+    // with the offending member named in both the message and the source.
+    let guard = WebhookGuard::new("s3cret").expect("a non-empty secret");
+    let body = br#"{"update_id":1,"poll":{"options":[{"text":"a","media":{"photo":[{"file_id":"A","fileSize":-1}]}}]}}"#;
+
+    let error = guard
+        .verify_and_parse(Some("s3cret"), guard.derived_path(), body)
+        .expect_err("a negative file size cannot be decoded");
+
+    match error {
+        Error::Payload { message, source } => {
+            assert!(message.contains("`file_size`"), "{message}");
+            let source = source.expect("the parser error is kept as the source");
+            assert!(source.to_string().contains("`file_size`"), "{source}");
+        }
+        other => panic!("expected Error::Payload, got {other:?}"),
+    }
+}
+
+#[test]
+fn the_bounds_survive_a_round_trip() {
+    let video = Video {
+        width: u32::MAX,
+        height: 0,
+        duration: u64::MAX,
+        start_timestamp: Some(0),
+        file_size: Some(u64::MAX),
+        ..Video::default()
+    };
+    let json = serde_json::to_string(&video).expect("the bounds serialize");
+    assert!(
+        !json.contains('-'),
+        "an unsigned member can only emit an unsigned number: {json}"
+    );
+    let back: Video = serde_json::from_str(&json).expect("the bounds parse back");
+    assert_eq!(back, video);
+}
+
+/// One numeric member: its label, its JSON template with `{v}` for the number
+/// under test, and whether that object parses.
+type NumericMember = (&'static str, &'static str, fn(&str) -> bool);
+
+/// Every numeric member of every media object.
+fn numeric_members() -> Vec<NumericMember> {
+    fn accepts<T: serde::de::DeserializeOwned>(json: &str) -> bool {
+        serde_json::from_str::<T>(json).is_ok()
+    }
+
+    vec![
+        ("PhotoSize.width", r#"{"width":{v}}"#, accepts::<PhotoSize>),
+        (
+            "PhotoSize.height",
+            r#"{"height":{v}}"#,
+            accepts::<PhotoSize>,
+        ),
+        (
+            "PhotoSize.file_size",
+            r#"{"file_size":{v}}"#,
+            accepts::<PhotoSize>,
+        ),
+        ("LivePhoto.width", r#"{"width":{v}}"#, accepts::<LivePhoto>),
+        (
+            "LivePhoto.height",
+            r#"{"height":{v}}"#,
+            accepts::<LivePhoto>,
+        ),
+        (
+            "LivePhoto.duration",
+            r#"{"duration":{v}}"#,
+            accepts::<LivePhoto>,
+        ),
+        (
+            "LivePhoto.file_size",
+            r#"{"file_size":{v}}"#,
+            accepts::<LivePhoto>,
+        ),
+        ("Animation.width", r#"{"width":{v}}"#, accepts::<Animation>),
+        (
+            "Animation.height",
+            r#"{"height":{v}}"#,
+            accepts::<Animation>,
+        ),
+        (
+            "Animation.duration",
+            r#"{"duration":{v}}"#,
+            accepts::<Animation>,
+        ),
+        (
+            "Animation.file_size",
+            r#"{"file_size":{v}}"#,
+            accepts::<Animation>,
+        ),
+        ("Audio.duration", r#"{"duration":{v}}"#, accepts::<Audio>),
+        ("Audio.file_size", r#"{"file_size":{v}}"#, accepts::<Audio>),
+        (
+            "Document.file_size",
+            r#"{"file_size":{v}}"#,
+            accepts::<Document>,
+        ),
+        (
+            "VideoQuality.width",
+            r#"{"width":{v}}"#,
+            accepts::<VideoQuality>,
+        ),
+        (
+            "VideoQuality.height",
+            r#"{"height":{v}}"#,
+            accepts::<VideoQuality>,
+        ),
+        (
+            "VideoQuality.file_size",
+            r#"{"file_size":{v}}"#,
+            accepts::<VideoQuality>,
+        ),
+        ("Video.width", r#"{"width":{v}}"#, accepts::<Video>),
+        ("Video.height", r#"{"height":{v}}"#, accepts::<Video>),
+        ("Video.duration", r#"{"duration":{v}}"#, accepts::<Video>),
+        (
+            "Video.start_timestamp",
+            r#"{"start_timestamp":{v}}"#,
+            accepts::<Video>,
+        ),
+        ("Video.file_size", r#"{"file_size":{v}}"#, accepts::<Video>),
+        ("Sticker.width", r#"{"width":{v}}"#, accepts::<Sticker>),
+        ("Sticker.height", r#"{"height":{v}}"#, accepts::<Sticker>),
+        (
+            "Sticker.file_size",
+            r#"{"file_size":{v}}"#,
+            accepts::<Sticker>,
+        ),
+    ]
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig { cases: 64, ..ProptestConfig::default() })]
+
+    /// No integer below zero is accepted by any numeric member, whatever its
+    /// magnitude - the whole negative range, not just `-1`.
+    #[test]
+    fn no_negative_number_is_ever_accepted(value in i64::MIN..=-1) {
+        for (label, template, accepts) in numeric_members() {
+            let json = template.replace("{v}", &value.to_string());
+            prop_assert!(!accepts(&json), "{} accepted {value}", label);
+        }
+    }
+
+    /// Unsigned counts survive a JSON round trip unchanged, at any magnitude.
+    #[test]
+    fn unsigned_members_round_trip(
+        width in any::<u32>(),
+        height in any::<u32>(),
+        duration in any::<u64>(),
+        file_size in any::<u64>(),
+    ) {
+        let sticker = Sticker { width, height, file_size: Some(file_size), ..Sticker::default() };
+        prop_assert_eq!(serde_json::from_str::<Sticker>(&serde_json::to_string(&sticker)?)?, sticker);
+
+        let audio = Audio { duration, file_size: Some(file_size), ..Audio::default() };
+        prop_assert_eq!(serde_json::from_str::<Audio>(&serde_json::to_string(&audio)?)?, audio);
+    }
+}
