@@ -8,8 +8,33 @@ means for this API is spelled out in the README under
 
 ## [Unreleased]
 
+### Changed
+
+- **Numeric media members are unsigned, and a negative one is a parse error**
+  (#60). `file_size`, `duration`, `width`, `height` and `start_timestamp` were
+  `i64`, so `{"file_size": -1}` deserialized into a media object that cannot
+  exist and was re-serialized unchanged. They are now `u64` (sizes, durations,
+  `start_timestamp`) and `u32` (pixel dimensions), and the value is checked while
+  parsing: a negative number fails with `Error::Payload` naming the member ("must
+  not be negative"), a number above the member's maximum with "is out of range".
+  Nothing is clamped, so a malformed object can never masquerade as a valid one.
+  Serde compatibility is otherwise unchanged: absent members still default, `null`
+  stays `None`, camelCase aliases are validated like the snake_case names, and
+  unknown members are still ignored. **Breaking** for callers that build those
+  structs or do arithmetic on the fields: the new types keep a caller from
+  passing an impossible value, but they do not compile against `i64` any more.
+
 ### Fixed
 
+- **`with_source` keeps the cause for `NotSent` and `Transport`** (#41). The
+  method only ever filled the `Ambiguous` slot, so a transport that reported
+  `Error::not_sent("dns failed").with_source(io_error)` lost the DNS/TLS cause
+  even though `NotSent` has a source field, and an already attached source was
+  replaced instead of preserved. It now attaches to every variant with a source
+  slot (`Ambiguous`, `NotSent`, `Transport`) and chains a second attachment
+  through `SourceChain`, so the newest failure is shown and the earlier one stays
+  reachable. Classification is untouched: `is_retryable`, `is_ambiguous`,
+  `retry_after` and `Display` are identical with and without a cause.
 - **A zero `parameters.retry_after` is no longer a hint** (#42). A 429 carrying
   `"retry_after": 0` became `RateLimited { retry_after: Some(0) }`, which shadowed
   a perfectly good textual hint ("Too Many Requests: retry after 6") and let
