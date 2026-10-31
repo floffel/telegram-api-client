@@ -322,14 +322,89 @@ impl Error {
         }
     }
 
-    /// Attaches the underlying failure to an ambiguous error.
+    /// Attaches the underlying failure, keeping any cause that is already there.
+    ///
+    /// [`Error::Ambiguous`], [`Error::NotSent`] and [`Error::Transport`] carry a
+    /// source slot and keep the failure; every other variant has nowhere to put
+    /// it and is returned unchanged. Attaching twice does not drop the first
+    /// cause: the newest failure becomes the visible one and the earlier
+    /// attachment stays behind it in the chain.
+    ///
+    /// A source is diagnosis, never routing: attaching one does not change
+    /// [`is_retryable`](Self::is_retryable),
+    /// [`is_ambiguous`](Self::is_ambiguous), [`retry_after`](Self::retry_after)
+    /// or the `Display` text.
+    ///
+    /// ```rust
+    /// use telegram_api_client::Error;
+    ///
+    /// // The retryable case: a connect failure, with its DNS cause kept so a
+    /// // log line says why the request never left the machine.
+    /// let error = Error::not_sent("dns: name resolution failed")
+    ///     .with_source(std::io::Error::other("no such host"));
+    /// assert!(error.is_retryable(), "nothing was written, a send may repeat");
+    /// let cause = std::error::Error::source(&error).expect("cause kept");
+    /// assert_eq!(cause.to_string(), "no such host");
+    ///
+    /// // A variant without a source slot is unchanged.
+    /// let api = Error::Api { code: 400, description: "Bad Request: chat not found".into() }
+    ///     .with_source(std::io::Error::other("no such host"));
+    /// assert!(matches!(api, Error::Api { .. }));
+    /// assert!(std::error::Error::source(&api).is_none());
+    ///
+    /// // Attaching twice keeps both causes, newest first.
+    /// let twice = Error::ambiguous("sendMessage", "timed out")
+    ///     .with_source(std::io::Error::other("first"))
+    ///     .with_source(std::io::Error::other("second"));
+    /// let newest = std::error::Error::source(&twice).expect("newest cause");
+    /// assert_eq!(newest.to_string(), "second");
+    /// let earlier = std::error::Error::source(newest).expect("earlier cause");
+    /// assert_eq!(earlier.to_string(), "first");
+    /// ```
     #[must_use]
     pub fn with_source(self, source: impl std::error::Error + Send + Sync + 'static) -> Self {
+        self.attach(Box::new(source))
+    }
+
+    /// Puts `source` into the source slot of the error, chaining an earlier cause.
+    ///
+    /// Private half of [`Self::with_source`]: the public method takes an
+    /// `impl Error`, transports hand in an already boxed failure, and both paths
+    /// must behave identically.
+    fn attach(self, source: Box<dyn std::error::Error + Send + Sync + 'static>) -> Self {
+        fn slot(
+            earlier: Option<Box<dyn std::error::Error + Send + Sync + 'static>>,
+            latest: Box<dyn std::error::Error + Send + Sync + 'static>,
+        ) -> Box<dyn std::error::Error + Send + Sync + 'static> {
+            match earlier {
+                Some(earlier) => Box::new(SourceChain { latest, earlier }),
+                None => latest,
+            }
+        }
+
         match self {
-            Self::Ambiguous { method, detail, .. } => Self::Ambiguous {
+            Self::Ambiguous {
                 method,
                 detail,
-                source: Some(Box::new(source)),
+                source: earlier,
+            } => Self::Ambiguous {
+                method,
+                detail,
+                source: Some(slot(earlier, source)),
+            },
+            Self::NotSent {
+                message,
+                source: earlier,
+            } => Self::NotSent {
+                message,
+                source: Some(slot(earlier, source)),
+            },
+            Self::Transport {
+                message,
+                source: earlier,
+            } => Self::Transport {
+                message,
+                source: Some(slot(earlier, source)),
             },
             other => other,
         }
@@ -567,5 +642,41 @@ pub fn parse_retry_after(description: &str) -> Option<u64> {
     usable_retry_after(seconds)
 }
 
-/// Convenience alias.
+/// Convenience alias for the error type of this crate.
+///
+/// ```rust
+/// use telegram_api_client::Result;
+///
+/// fn answer() -> Result<u32> {
+///     Ok(42)
+/// }
+///
+/// assert_eq!(answer().expect("ok"), 42);
+/// ```
 pub type Result<T> = std::result::Result<T, Error>;
+
+/// Two attached causes held in one linear chain.
+///
+/// [`Error::with_source`] builds this when a source is attached to an error that
+/// already had one, so the second attachment does not silently erase the first.
+/// `Display` and `Debug` show the newest failure; `source()` walks on to the
+/// earlier attachment. `std::error::Error` chains are linear, so when the newest
+/// failure carries a cause of its own, that cause is walked instead - a chain has
+/// one branch, not two.
+#[derive(Debug)]
+struct SourceChain {
+    latest: Box<dyn std::error::Error + Send + Sync + 'static>,
+    earlier: Box<dyn std::error::Error + Send + Sync + 'static>,
+}
+
+impl std::fmt::Display for SourceChain {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.latest)
+    }
+}
+
+impl std::error::Error for SourceChain {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        std::error::Error::source(self.latest.as_ref()).or(Some(self.earlier.as_ref()))
+    }
+}
