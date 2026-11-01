@@ -863,12 +863,17 @@ impl<T: Transport> TelegramClient<T> {
         /// Fetches one chat member.
         ///
         /// ```
-        /// use telegram_api_client::{GetChatMember, MockTransport, TelegramClient};
+        /// use telegram_api_client::{GetChatMember, MockReply, MockTransport, TelegramClient};
         ///
         /// # async fn demo() -> telegram_api_client::Result<()> {
-        /// let client = TelegramClient::new("123:ABC", MockTransport::new());
+        /// let transport = MockTransport::new();
+        /// transport.push(MockReply::result(serde_json::json!({
+        ///     "status": "member",
+        ///     "user": {"id": 42, "first_name": "Flo"},
+        /// })));
+        /// let client = TelegramClient::new("123:ABC", transport);
         /// let member = client.get_chat_member(&GetChatMember::new(-1001, 42)).await?;
-        /// assert!(!member.is_present());
+        /// assert!(member.is_present());
         /// # Ok(()) }
         /// ```
         get_chat_member, "getChatMember", GetChatMember, ChatMember
