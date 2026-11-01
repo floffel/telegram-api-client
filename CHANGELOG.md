@@ -64,7 +64,8 @@ means for this API is spelled out in the README under
   the raw-`Value` return type are unchanged; only the failures that used to
   escape are errors now. The `MAX_MESSAGE_TEXT` boundary pair is tested on the
   wrapper itself, and the envelope cases run against a transport that returns the
-  body verbatim.
+  body verbatim: `ok: false`, a missing `result`, and a body-level 429, whose
+  `retry_after` hint survives the trip through the gate.
 
 ## [0.1.8] - 2026-10-28
 

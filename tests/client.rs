@@ -1,6 +1,7 @@
 //! Client payloads against a recording transport.
 
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use serde_json::{json, Value};
 use telegram_api_client::{Error, Result, TelegramClient, Transport};
@@ -109,6 +110,35 @@ async fn legacy_get_me_surfaces_a_failed_envelope() {
 
     assert!(matches!(error, Error::Api { code: 401, .. }), "{error:?}");
     assert_eq!(rec.calls.lock().unwrap().len(), 1);
+}
+
+/// A 429 arrives as a *successful* transport answer, so it is the envelope gate
+/// that has to turn it into an error — and it has to keep the server's hint,
+/// because a wrapper that dropped it would turn a rate limit into a hot loop.
+#[tokio::test]
+#[allow(deprecated)]
+async fn legacy_wrappers_surface_a_rate_limited_envelope() {
+    let rec = recorder(json!({
+        "ok": false,
+        "error_code": 429,
+        "description": "Too Many Requests: retry after 7",
+        "parameters": { "retry_after": 7 }
+    }));
+    let client = TelegramClient::new("123:ABC", rec.clone());
+
+    let me = client.get_me().await.unwrap_err();
+    assert!(matches!(me, Error::RateLimited { .. }), "{me:?}");
+    assert_eq!(me.retry_after(), Some(Duration::from_secs(7)), "{me:?}");
+
+    let sent = client.send_message(-1001, "Hallo").await.unwrap_err();
+    assert!(matches!(sent, Error::RateLimited { .. }), "{sent:?}");
+    assert_eq!(sent.retry_after(), Some(Duration::from_secs(7)), "{sent:?}");
+
+    assert_eq!(
+        rec.calls.lock().unwrap().len(),
+        2,
+        "a body-level 429 is reported, never retried on the wrapper's behalf"
+    );
 }
 
 /// An answer with no `result` is a decoding failure, not an empty success — for
