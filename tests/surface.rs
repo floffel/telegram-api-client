@@ -717,4 +717,21 @@ fn chat_member_accessors_cover_every_shape() {
     assert_eq!(rendered["status"], "ghost");
     assert_eq!(rendered["user"]["id"], 3);
     assert_eq!(rendered["haunting_since"], 5);
+
+    // The same rule binds a modelled shape: the variant owns `status` and
+    // `user`, so an entry in `extra` cannot disguise them.
+    let mut extra = Map::new();
+    extra.insert("status".to_string(), json!("member"));
+    extra.insert("user".to_string(), json!({"id": 99}));
+    let disguised = ChatMember::Creator(ChatMemberOwner {
+        user: User {
+            id: 4,
+            ..User::default()
+        },
+        extra,
+        ..ChatMemberOwner::default()
+    });
+    let rendered = serde_json::to_value(&disguised).unwrap();
+    assert_eq!(rendered["status"], "creator");
+    assert_eq!(rendered["user"]["id"], 4);
 }

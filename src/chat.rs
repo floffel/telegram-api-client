@@ -593,8 +593,10 @@ pub struct ChatMemberBanned {
 /// what #26 was about). A `status` this crate does not model yet is carried as
 /// [`ChatMember::Unknown`] *with* its user and every other member, and a field no
 /// variant models lands in that shape's `extra` map, so nothing the server said
-/// is dropped on the way in or on the way out. `status` is written first, then
-/// the shape's fields in wire order, then `extra`.
+/// is dropped on the way in or on the way out. Serialising writes `status` and
+/// `user` from the variant itself, so a copy a caller left in `extra` can never
+/// disagree with the variant; the other keys go out as the shape holds them
+/// (`serde_json`'s map decides the key order — this crate promises none).
 ///
 /// ```
 /// use telegram_api_client::{ChatMember, ChatMemberStatus};
@@ -925,12 +927,17 @@ impl Serialize for ChatMember {
                 "a chat member must serialize as an object",
             ));
         };
-        // The variant decides the status word; nothing in the payload can
-        // override it.
+        // The variant decides the status word and the user; nothing the payload
+        // carries — a hand-built `extra` entry, say — can override either.
         let _ = fields.remove("status");
+        let _ = fields.remove("user");
 
         let mut out = Map::new();
         out.insert("status".to_string(), Value::String(status.to_string()));
+        out.insert(
+            "user".to_string(),
+            serde_json::to_value(self.user()).map_err(S::Error::custom)?,
+        );
         out.extend(fields);
         Value::Object(out).serialize(serializer)
     }
