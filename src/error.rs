@@ -127,6 +127,26 @@ pub enum Error {
         /// What was missing or malformed.
         detail: String,
     },
+    /// A response body was larger than the documented limit and was dropped
+    /// unread.
+    ///
+    /// The bundled `ReqwestTransport` refuses to read more than
+    /// `MAX_RESPONSE_BYTES` (16 MiB by default, lowered or raised with
+    /// `ReqwestTransport::with_max_response_bytes`), so a proxy, a gateway or a
+    /// custom base URL cannot make the client parse an unbounded body. The
+    /// limit exists because a parsed body can no longer be bounded: the size of
+    /// a `serde_json::Value` is decided while parsing it.
+    ///
+    /// The Bot API did answer, which is why [`Self::is_ambiguous`] is `true`:
+    /// a send was most likely applied, so resending it needs a decision from
+    /// the caller's own ledger, not from this error.
+    #[error("response for {method} exceeds the {limit}-byte limit; discarded unread")]
+    ResponseTooLarge {
+        /// Bot API method whose answer was discarded.
+        method: String,
+        /// The limit that applied, in bytes.
+        limit: usize,
+    },
 }
 
 /// Renders the retry hint for `RateLimited`'s `Display` impl.
@@ -150,6 +170,9 @@ impl Error {
     /// where a retry may duplicate the message, and for the unphased
     /// [`Error::Transport`] — that one is only a statement that *something*
     /// failed, so it must be classified for its method before it is retried.
+    ///
+    /// [`Error::ResponseTooLarge`] is `false` too: the answer arrived and was
+    /// dropped, so a second attempt gets the same oversized body.
     ///
     /// ```rust
     /// use telegram_api_client::Error;
@@ -181,16 +204,20 @@ impl Error {
             | Self::Payload { .. }
             | Self::InvalidRequest { .. }
             | Self::Ambiguous { .. }
-            | Self::Unexpected { .. } => false,
+            | Self::Unexpected { .. }
+            | Self::ResponseTooLarge { .. } => false,
         }
     }
 
     /// Whether the request may have been accepted even though the call failed.
     ///
-    /// `true` only for [`Error::Ambiguous`]: the caller must decide, from its own
-    /// ledger, whether re-sending is acceptable. `false` for everything else —
-    /// a 429 or a connect error provably did not reach the bot, and the
-    /// remaining errors are terminal.
+    /// `true` for [`Error::Ambiguous`] and for [`Error::ResponseTooLarge`]: in
+    /// both cases the caller must decide, from its own ledger, whether
+    /// re-sending is acceptable. An oversized response means the Bot API did
+    /// answer — the request reached it — while its body is gone.
+    ///
+    /// `false` for everything else — a 429 or a connect error provably did not
+    /// reach the bot, and the remaining errors are terminal.
     ///
     /// ```rust
     /// use telegram_api_client::Error;
@@ -200,10 +227,16 @@ impl Error {
     ///
     /// let limited = Error::RateLimited { retry_after: None, code: 429, description: String::new() };
     /// assert!(!limited.is_ambiguous());
+    ///
+    /// // A discarded answer: the message went out, the reply did not arrive.
+    /// let dropped = Error::ResponseTooLarge { method: "sendMessage".into(), limit: 16 * 1024 * 1024 };
+    /// assert!(dropped.is_ambiguous());
+    /// assert!(!dropped.is_retryable(), "the same body would be too large again");
+    /// assert!(dropped.to_string().contains("sendMessage"));
     /// ```
     #[must_use]
     pub fn is_ambiguous(&self) -> bool {
-        matches!(self, Self::Ambiguous { .. })
+        matches!(self, Self::Ambiguous { .. } | Self::ResponseTooLarge { .. })
     }
 
     /// Re-classifies a failure for `method`.
