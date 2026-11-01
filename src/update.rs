@@ -561,7 +561,7 @@ impl Update {
     ///         "new_chat_member":{"status":"member","user":{"id":2}}}}"#,
     /// ).unwrap();
     /// let changed = update.chat_member_update().unwrap();
-    /// assert_eq!(changed.new_chat_member.status, ChatMemberStatus::Member);
+    /// assert_eq!(changed.new_chat_member.status(), ChatMemberStatus::Member);
     /// assert!(update.chat_member.is_none());
     /// ```
     #[must_use]

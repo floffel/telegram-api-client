@@ -2,12 +2,12 @@
 //! examples an author thought of.
 
 use proptest::prelude::*;
-use serde_json::{Map, Value};
+use serde_json::{json, Map, Value};
 use std::time::Duration;
 use telegram_api_client::{
-    guess_mime, is_idempotent, is_valid_mime, send::MAX_POLL_OPTION, ChatId, EntityKind, Error,
-    InputMedia, InputMediaKind, MessageEntity, MultipartFile, MultipartForm, ParseMode, PollType,
-    RetryPolicy, SendMessage, SendPoll, Update, UpdateCursor,
+    guess_mime, is_idempotent, is_valid_mime, send::MAX_POLL_OPTION, ChatId, ChatMember,
+    ChatMemberStatus, EntityKind, Error, InputMedia, InputMediaKind, MessageEntity, MultipartFile,
+    MultipartForm, ParseMode, PollType, RetryPolicy, SendMessage, SendPoll, Update, UpdateCursor,
 };
 
 proptest! {
@@ -432,6 +432,85 @@ proptest! {
         let b = MultipartForm::new().field("caption", value.clone());
         prop_assert_eq!(a.boundary(), b.boundary());
         prop_assert!(a.boundary().starts_with("telegram-api-client-"));
+    }
+
+    /// A member keeps the data its status carries, whatever the values are
+    /// (issue #25): the typed accessors answer what the payload said, an
+    /// unmodelled field survives both directions, and the crate's own output is
+    /// a fixed point.
+    #[test]
+    fn chat_member_keeps_its_status_payload(
+        id in any::<i64>(),
+        until in any::<i64>(),
+        title in "[ -~]{0,16}",
+        bit in any::<bool>(),
+        unknown_key in "x[a-z_]{0,10}",
+    ) {
+        let payloads = [
+            json!({"status": "creator", "user": {"id": id}, "is_anonymous": bit, "custom_title": title}),
+            json!({"status": "administrator", "user": {"id": id}, "can_be_edited": !bit,
+                   "is_anonymous": bit, "can_manage_chat": bit, "can_delete_messages": bit,
+                   "can_manage_video_chats": bit, "can_restrict_members": bit,
+                   "can_promote_members": bit, "can_change_info": bit, "can_invite_users": bit,
+                   "can_post_stories": bit, "can_edit_stories": bit, "can_delete_stories": bit,
+                   "can_post_messages": !bit, "can_edit_messages": bit, "can_pin_messages": bit,
+                   "can_manage_topics": bit, "can_manage_direct_messages": !bit,
+                   "can_manage_tags": bit, "can_send_welcome_messages": !bit, "custom_title": title}),
+            json!({"status": "member", "user": {"id": id}, "tag": title, "until_date": until}),
+            json!({"status": "restricted", "user": {"id": id}, "tag": title, "is_member": bit,
+                   "can_send_messages": bit, "can_send_audios": bit, "can_send_documents": bit,
+                   "can_send_photos": bit, "can_send_videos": bit, "can_send_video_notes": bit,
+                   "can_send_voice_notes": bit, "can_send_polls": bit,
+                   "can_send_other_messages": bit, "can_add_web_page_previews": bit,
+                   "can_react_to_messages": bit, "can_edit_tag": bit, "can_change_info": bit,
+                   "can_invite_users": bit, "can_pin_messages": bit, "can_manage_topics": bit,
+                   "until_date": until}),
+            json!({"status": "left", "user": {"id": id}}),
+            json!({"status": "kicked", "user": {"id": id}, "until_date": until}),
+        ];
+
+        for mut payload in payloads {
+            payload[unknown_key.as_str()] = json!("kept");
+            let status = payload["status"].as_str().unwrap_or_default().to_string();
+            let member: ChatMember = serde_json::from_value(payload).unwrap();
+
+            prop_assert_eq!(member.user().id, id);
+            let reported = member.status();
+            prop_assert_eq!(reported.as_str(), status.as_str());
+
+            let rendered = serde_json::to_value(&member).unwrap();
+            prop_assert_eq!(
+                &rendered[unknown_key.as_str()],
+                &json!("kept"),
+                "an unmodelled field was dropped"
+            );
+
+            let reparsed: ChatMember = serde_json::from_value(rendered).unwrap();
+            prop_assert_eq!(reparsed, member, "serialisation lost information");
+        }
+    }
+
+    /// A status the crate does not model keeps its user and every other field,
+    /// so a Bot API that grows a seventh member type does not make the model
+    /// lossy.
+    #[test]
+    fn an_unmodelled_member_status_round_trips(status in "[a-z_]{0,12}", id in any::<i64>()) {
+        prop_assume!(!matches!(
+            status.as_str(),
+            "creator" | "administrator" | "member" | "restricted" | "left" | "kicked"
+        ));
+        // `first_name` is part of the payload because the crate always writes it
+        // back: a `User` without one decodes to the empty string.
+        let payload = json!({
+            "status": status,
+            "user": {"id": id, "first_name": "Flo"},
+            "extra_bit": true
+        });
+        let member: ChatMember = serde_json::from_value(payload.clone()).unwrap();
+
+        prop_assert_eq!(member.status(), ChatMemberStatus::Unknown(status.clone()));
+        prop_assert_eq!(member.user().id, id);
+        prop_assert_eq!(serde_json::to_value(&member).unwrap(), payload);
     }
 }
 

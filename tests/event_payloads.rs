@@ -6,7 +6,7 @@
 
 use telegram_api_client::{
     ChatBoostSource, ChatMember, ChatMemberStatus, ChatMemberUpdated, Location, ReactionCount,
-    ReactionType,
+    ReactionType, User,
 };
 
 fn reaction(json: &str) -> ReactionType {
@@ -94,10 +94,15 @@ fn boost_sources_are_tolerant_and_name_their_kind() {
     assert_eq!(future.user().map(|user| user.id), None);
 }
 
+/// A member with `status` and, for a restricted one, `is_member` set — the bit
+/// that decides presence for that shape.
 fn member(status: ChatMemberStatus) -> ChatMember {
-    ChatMember {
-        status,
-        ..ChatMember::default()
+    match ChatMember::new(status, User::default()) {
+        ChatMember::Restricted(mut restricted) => {
+            restricted.is_member = true;
+            ChatMember::Restricted(restricted)
+        }
+        other => other,
     }
 }
 

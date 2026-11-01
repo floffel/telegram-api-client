@@ -132,6 +132,18 @@ Reply/inline keyboards are typed (`ReplyMarkup`, `InlineKeyboardMarkup`,
 `KeyboardButton`, …), as are `MessageEntity`, `LinkPreviewOptions`, `ChatId`
 and the `MenuButton` variants.
 
+`ChatMember` — the result of `getChatMember` and both members of a
+`ChatMemberUpdated` — is a union of six shapes that share only `status` and
+`user`, so it is a status-tagged enum: `ChatMember::Creator`,
+`Administrator`, `Member`, `Restricted`, `Left`, `Banned` (wire status
+`kicked`), each wrapping the payload type of the same name
+(`ChatMemberOwner`, `ChatMemberAdministrator`, …) with every field the Bot API
+documents for it. The accessors (`status`, `user`, `is_anonymous`,
+`custom_title`, `until_date`, `is_member`, `is_present`) answer the common
+questions without a match; `extra` on every shape keeps a field a later Bot API
+adds, and an unknown `status` is carried as `ChatMember::Unknown` with its user
+and payload instead of being reduced to "some member".
+
 ## Update surface (Bot API 10.3)
 
 `BOT_API_VERSION` pins the revision every wire shape in this crate is checked
@@ -282,7 +294,8 @@ compiling and fails loudly instead of silently dropping the file.
 
 - **Permissive decoding.** Unknown JSON fields are ignored, unknown enum values
   are carried (`ParseMode::Unknown`, `ChatType::Unknown`, `ReplyMarkup::Unknown`,
-  …) and re-serialized unchanged, missing optionals default, and both
+  `ChatMember::Unknown`, …) and re-serialized unchanged, missing optionals
+  default, and both
   `snake_case` and `camelCase` spellings are accepted. Mandatory members stay
   mandatory: a payload without them (a `ChatMember` without `status` or `user`,
   say) fails with `Error::Payload` rather than turning into a default value.
