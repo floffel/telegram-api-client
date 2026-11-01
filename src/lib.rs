@@ -78,9 +78,9 @@ pub use send::{
     SendPhoto, SendPoll, SendVenue, SendVideo, SendVoice, UploadFile, MAX_FILE_URL_BYTES,
     MAX_PHOTO_BYTES, MAX_PHOTO_URL_BYTES, MAX_UPLOAD_BYTES,
 };
-#[cfg(feature = "http")]
-pub use transport::ReqwestTransport;
 pub use transport::{Call, MockReply, MockTransport, MultipartFile, MultipartForm, Transport};
+#[cfg(feature = "http")]
+pub use transport::{ReqwestTransport, MAX_RESPONSE_BYTES};
 pub use types::{
     ChatAction, ChatId, ChatMemberStatus, ChatType, EntityKind, ForceReply, InlineKeyboardButton,
     InlineKeyboardMarkup, InputMedia, InputMediaKind, KeyboardButton, LinkPreviewOptions,
