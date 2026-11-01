@@ -284,7 +284,7 @@ async fn an_invalid_thread_stops_a_send_message_too() {
         .await
         .expect_err("a negative thread id is refused locally");
     assert_eq!(invalid_request(Err(error)).0, "message_thread_id");
-    assert!(transport.calls().is_empty());
+    assert_eq!(transport.calls(), Vec::new());
 }
 
 // ---- properties -----------------------------------------------------------
