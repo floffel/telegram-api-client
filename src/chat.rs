@@ -316,6 +316,12 @@ impl UnpinChatMessage {
 
 /// One member of a chat, as returned by `getChatMember`.
 ///
+/// `status` and `user` are mandatory in the Bot API, and they are mandatory
+/// here too: a payload missing either one fails to decode instead of turning
+/// into a default member, so a truncated response can never masquerade as a
+/// real identity. A `status` this crate does not know yet is still carried as
+/// [`ChatMemberStatus::Unknown`] — that is a new value, not a missing one.
+///
 /// ```
 /// use telegram_api_client::{ChatMember, ChatMemberStatus};
 ///
@@ -324,14 +330,23 @@ impl UnpinChatMessage {
 /// ).unwrap();
 /// assert_eq!(member.status, ChatMemberStatus::Creator);
 /// assert_eq!(member.user.id, 42);
+///
+/// // Unknown status values are carried, not rejected.
+/// let fresh: ChatMember = serde_json::from_str(
+///     r#"{"status":"ghost","user":{"id":42,"first_name":"Flo"}}"#,
+/// ).unwrap();
+/// assert_eq!(fresh.status, ChatMemberStatus::Unknown("ghost".to_string()));
+///
+/// // Without a user there is no member to report: the payload is rejected.
+/// assert!(serde_json::from_str::<ChatMember>(r#"{"status":"creator"}"#).is_err());
 /// ```
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
 pub struct ChatMember {
-    /// Membership status.
-    #[serde(default)]
+    /// Membership status. Required: its absence is a decode error, never
+    /// [`ChatMemberStatus::Unknown`].
     pub status: ChatMemberStatus,
-    /// The user behind the membership.
-    #[serde(default)]
+    /// The user behind the membership. Required: its absence is a decode
+    /// error, never a fabricated default user.
     pub user: crate::update::User,
     /// Whether the member hides behind the chat identity.
     #[serde(default, skip_serializing_if = "Option::is_none")]

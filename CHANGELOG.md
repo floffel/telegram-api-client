@@ -26,6 +26,7 @@ means for this API is spelled out in the README under
 
 ### Fixed
 
+<<<<<<< HEAD
 - **A body-level error is classified inside the retry loop** (#29). `post` used
   to hand back any `Ok` envelope and let `take_result` build the error
   afterwards, so a transport that delivers the decoded `{"ok": false, ...}` body
@@ -44,6 +45,17 @@ means for this API is spelled out in the README under
   the decoding error itself, since nothing changed and repeating the call is
   free. `Transport` implementations may therefore stay dumb: returning the body
   unjudged is now as safe as calling `Error::from_api_body` themselves.
+- **A `getChatMember` result missing `status` or `user` is a decode error** (#26).
+  Both members are mandatory in the Bot API, but `ChatMember` marked them
+  `serde(default)`, so a truncated or malformed payload decoded into a member
+  with an empty `Unknown` status and the default user — a fabricated identity
+  instead of a failure. The two members are now required: their absence (or a
+  `null`) surfaces as `Error::Payload { message, source }` naming the method and
+  keeping the `serde_json` failure as the source. Nothing else got stricter —
+  an unknown `status` value is still carried verbatim as
+  `ChatMemberStatus::Unknown`, unknown fields are still ignored, and the
+  optional members (`is_anonymous`) still default.
+>>>>>>> origin/main
 - **`with_source` keeps the cause for `NotSent` and `Transport`** (#41). The
   method only ever filled the `Ambiguous` slot, so a transport that reported
   `Error::not_sent("dns failed").with_source(io_error)` lost the DNS/TLS cause

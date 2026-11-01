@@ -302,6 +302,73 @@ fn message_ids_must_be_positive() {
     assert_invalid(GetFile::new("   ").validate().unwrap_err(), "file_id");
 }
 
+// ---- chat members --------------------------------------------------------
+
+/// `status` and `user` are mandatory in a `getChatMember` result: a payload
+/// without either one is a decode error, not a default member (issue #26).
+#[test]
+fn chat_member_requires_status_and_user() {
+    use telegram_api_client::{ChatMember, ChatMemberStatus};
+
+    // The full shape Telegram sends, plus the minimal required one. Everything
+    // else stays optional, so the second object is all a caller must send.
+    let full: ChatMember = serde_json::from_str(
+        r#"{"status":"kicked","user":{"id":42,"first_name":"Flo"},"is_anonymous":true}"#,
+    )
+    .expect("the complete shape decodes");
+    assert_eq!(full.status, ChatMemberStatus::Kicked);
+    assert_eq!(full.user.id, 42);
+    assert_eq!(full.is_anonymous, Some(true));
+
+    let minimal: ChatMember = serde_json::from_str(r#"{"status":"member","user":{"id":42}}"#)
+        .expect("status and user are enough");
+    assert_eq!(minimal.status, ChatMemberStatus::Member);
+    assert_eq!(minimal.is_anonymous, None);
+    assert!(minimal.is_present());
+
+    // Status and user are the two required members. Either one missing (or
+    // present but null, or of the wrong shape) is a decode error instead of a
+    // silently defaulted member.
+    for payload in [
+        r#"{"user":{"id":42,"first_name":"Flo"}}"#, // no status
+        r#"{"status":"member"}"#,                   // no user
+        r"{}",                                      // neither
+        r#"{"status":"member","user":null}"#,       // user null
+        r#"{"status":null,"user":{"id":42}}"#,      // status null
+        r#"{"status":"member","user":42}"#,         // user not an object
+    ] {
+        let parsed: Result<ChatMember, _> = serde_json::from_str(payload);
+        assert!(parsed.is_err(), "{payload} must not decode into a member");
+    }
+
+    // A status this crate does not know is required data, not absent data: it
+    // is still carried as `Unknown`.
+    let fresh: ChatMember = serde_json::from_str(r#"{"status":"ghost","user":{"id":42}}"#).unwrap();
+    assert_eq!(fresh.status, ChatMemberStatus::Unknown("ghost".to_string()));
+    assert!(!fresh.is_present(), "an unknown status is not presence");
+}
+
+/// A member update carries the same required members, so a truncated one is
+/// rejected one level up as well (the update itself still defaults whole
+/// members it was not sent, which is the documented permissive behaviour).
+#[test]
+fn chat_member_update_rejects_a_partial_member() {
+    let partial = r#"{"chat":{"id":-1},"date":1,
+        "old_chat_member":{"status":"left"},
+        "new_chat_member":{"status":"member","user":{"id":9}}}"#;
+    assert!(
+        serde_json::from_str::<telegram_api_client::ChatMemberUpdated>(partial).is_err(),
+        "a member without its user must not decode inside an update"
+    );
+
+    let full = r#"{"chat":{"id":-1},"date":1,
+        "old_chat_member":{"status":"left","user":{"id":9}},
+        "new_chat_member":{"status":"member","user":{"id":9}}}"#;
+    let updated: telegram_api_client::ChatMemberUpdated =
+        serde_json::from_str(full).expect("the complete shape decodes");
+    assert!(updated.joined());
+}
+
 #[test]
 fn edit_target_needs_exactly_one_addressing_form() {
     assert!(EditMessageText::new(CHAT, 7, "x").validate().is_ok());
