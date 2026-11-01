@@ -436,7 +436,7 @@ impl ChatInviteLink {
 ///         "old_chat_member":{"status":"left","user":{"id":2}},
 ///         "new_chat_member":{"status":"member","user":{"id":2}}}"#,
 /// ).unwrap();
-/// assert_eq!(updated.old_chat_member.status, ChatMemberStatus::Left);
+/// assert_eq!(updated.old_chat_member.status(), ChatMemberStatus::Left);
 /// assert!(updated.joined());
 /// ```
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -479,11 +479,11 @@ impl ChatMemberUpdated {
     /// Whether the member is present after the change but was not before.
     ///
     /// ```
-    /// use telegram_api_client::{ChatMember, ChatMemberStatus, ChatMemberUpdated};
+    /// use telegram_api_client::{ChatMember, ChatMemberStatus, ChatMemberUpdated, User};
     ///
     /// let mut updated = ChatMemberUpdated::default();
-    /// updated.old_chat_member.status = ChatMemberStatus::Left;
-    /// updated.new_chat_member.status = ChatMemberStatus::Member;
+    /// updated.old_chat_member = ChatMember::new(ChatMemberStatus::Left, User::default());
+    /// updated.new_chat_member = ChatMember::new(ChatMemberStatus::Member, User::default());
     /// assert!(updated.joined());
     ///
     /// updated.new_chat_member = ChatMember::default();

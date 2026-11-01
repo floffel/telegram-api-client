@@ -450,7 +450,7 @@ async fn chat_administration() {
         .await
         .unwrap();
     assert!(member.is_present());
-    assert_eq!(member.user.display_name(), "Flo");
+    assert_eq!(member.user().display_name(), "Flo");
     assert_call(
         &transport,
         "getChatMember",
@@ -507,7 +507,11 @@ async fn truncated_chat_member_reply_is_a_payload_error() {
         .get_chat_member(&GetChatMember::new(CHAT, 42))
         .await
         .unwrap();
-    assert_eq!(member.user.id, 42);
+    assert_eq!(member.user().id, 42);
+    assert!(matches!(
+        member,
+        telegram_api_client::ChatMember::Administrator(_)
+    ));
 
     for truncated in [
         json!({"user": {"id": 42, "first_name": "Flo"}}), // no status

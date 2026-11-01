@@ -10,6 +10,31 @@ means for this API is spelled out in the README under
 
 ### Changed
 
+- **`ChatMember` keeps the data its status carries** (#25). The type modelled
+  only `status`, `user` and `is_anonymous`, so serde silently dropped everything
+  else Telegram sends — the `can_*` rights, `is_member`, `until_date`,
+  `custom_title`, `tag` — and a member could not be serialised back with the
+  state it arrived with. `ChatMember` is now a status-tagged enum with one
+  variant per documented member type (`ChatMember::Creator`, `Administrator`,
+  `Member`, `Restricted`, `Left`, `Banned`) wrapping a payload struct of the same
+  name, so the fields of a status are typed and reachable instead of missing.
+  `ChatMember::Unknown` keeps an unmodelled `status` *with* its user and payload,
+  and every shape has an `extra` map for a field a later Bot API adds, so a
+  decode/serialise round trip drops nothing — a complete payload re-serialises to
+  exactly what the server sent. Accessors answer the common questions without a
+  match — `status()`, `user()`, `is_anonymous()`, `custom_title()`,
+  `until_date()`, `is_member()` and the unchanged `is_present()` — and
+  `ChatMember::new(status, user)` builds one. Unchanged on purpose: `status` and
+  `user` stay the only required members (#26), an absent mandatory right reads as
+  `false` and an absent optional one as `None`, and `until_date: 0` is passed
+  through as "forever" rather than filtered. Changed on purpose: `is_present()`
+  reads `is_member` for a restricted member, because that bit — not the status
+  alone — says whether the user is in the chat, so a restricted member with
+  `is_member: false` no longer counts as a join in
+  `ChatMemberUpdated::joined`. **Breaking** for callers that read the fields
+  (`member.user` is now `member.user()`) or build the struct literally (use
+  `ChatMember::new` or the payload structs).
+
 - **Numeric media members are unsigned, and a negative one is a parse error**
   (#60). `file_size`, `duration`, `width`, `height` and `start_timestamp` were
   `i64`, so `{"file_size": -1}` deserialized into a media object that cannot

@@ -310,42 +310,30 @@ fn message_ids_must_be_positive() {
 fn chat_member_requires_status_and_user() {
     use telegram_api_client::{ChatMember, ChatMemberStatus};
 
-    // The full shape Telegram sends, plus the minimal required one. Everything
-    // else stays optional, so the second object is all a caller must send.
-    let full: ChatMember = serde_json::from_str(
-        r#"{"status":"kicked","user":{"id":42,"first_name":"Flo"},"is_anonymous":true}"#,
-    )
-    .expect("the complete shape decodes");
-    assert_eq!(full.status, ChatMemberStatus::Kicked);
-    assert_eq!(full.user.id, 42);
-    assert_eq!(full.is_anonymous, Some(true));
-
+    // The minimal required shape — everything else is optional.
     let minimal: ChatMember = serde_json::from_str(r#"{"status":"member","user":{"id":42}}"#)
         .expect("status and user are enough");
-    assert_eq!(minimal.status, ChatMemberStatus::Member);
-    assert_eq!(minimal.is_anonymous, None);
+    assert_eq!(minimal.status(), ChatMemberStatus::Member);
+    assert_eq!(minimal.user().id, 42);
+    assert_eq!(minimal.is_anonymous(), None);
     assert!(minimal.is_present());
 
     // Status and user are the two required members. Either one missing (or
     // present but null, or of the wrong shape) is a decode error instead of a
     // silently defaulted member.
     for payload in [
-        r#"{"user":{"id":42,"first_name":"Flo"}}"#, // no status
-        r#"{"status":"member"}"#,                   // no user
-        r"{}",                                      // neither
-        r#"{"status":"member","user":null}"#,       // user null
-        r#"{"status":null,"user":{"id":42}}"#,      // status null
-        r#"{"status":"member","user":42}"#,         // user not an object
+        r#"{"user":{"id":42,"first_name":"Flo"}}"#,  // no status
+        r#"{"status":"member"}"#,                    // no user
+        r"{}",                                       // neither
+        r#"{"status":"member","user":null}"#,        // user null
+        r#"{"status":null,"user":{"id":42}}"#,       // status null
+        r#"{"status":"member","user":42}"#,          // user not an object
+        r#"{"status":42,"user":{"id":42}}"#,         // status not a string
+        r#"[{"status":"member","user":{"id":42}}]"#, // not even an object
     ] {
         let parsed: Result<ChatMember, _> = serde_json::from_str(payload);
         assert!(parsed.is_err(), "{payload} must not decode into a member");
     }
-
-    // A status this crate does not know is required data, not absent data: it
-    // is still carried as `Unknown`.
-    let fresh: ChatMember = serde_json::from_str(r#"{"status":"ghost","user":{"id":42}}"#).unwrap();
-    assert_eq!(fresh.status, ChatMemberStatus::Unknown("ghost".to_string()));
-    assert!(!fresh.is_present(), "an unknown status is not presence");
 }
 
 /// A member update carries the same required members, so a truncated one is
@@ -353,6 +341,8 @@ fn chat_member_requires_status_and_user() {
 /// members it was not sent, which is the documented permissive behaviour).
 #[test]
 fn chat_member_update_rejects_a_partial_member() {
+    use telegram_api_client::{ChatMemberStatus, ChatMemberUpdated};
+
     let partial = r#"{"chat":{"id":-1},"date":1,
         "old_chat_member":{"status":"left"},
         "new_chat_member":{"status":"member","user":{"id":9}}}"#;
@@ -364,9 +354,276 @@ fn chat_member_update_rejects_a_partial_member() {
     let full = r#"{"chat":{"id":-1},"date":1,
         "old_chat_member":{"status":"left","user":{"id":9}},
         "new_chat_member":{"status":"member","user":{"id":9}}}"#;
-    let updated: telegram_api_client::ChatMemberUpdated =
+    let updated: ChatMemberUpdated =
         serde_json::from_str(full).expect("the complete shape decodes");
     assert!(updated.joined());
+    assert_eq!(updated.old_chat_member.status(), ChatMemberStatus::Left);
+    assert_eq!(updated.new_chat_member.status(), ChatMemberStatus::Member);
+}
+
+/// Every status-specific member survives the decode and comes back out again
+/// (issue #25): the administrator's whole permission set, the restricted
+/// member's bits, the ban deadline, the custom title — plus a field no version
+/// of this crate models.
+#[test]
+fn chat_member_keeps_status_specific_fields() {
+    use telegram_api_client::ChatMember;
+
+    // A complete administrator object, exactly as Bot API 10.3 documents it.
+    let wire = json!({
+        "status": "administrator",
+        "user": {"id": 42, "first_name": "Flo"},
+        "can_be_edited": false,
+        "is_anonymous": true,
+        "can_manage_chat": true,
+        "can_delete_messages": true,
+        "can_manage_video_chats": false,
+        "can_restrict_members": true,
+        "can_promote_members": false,
+        "can_change_info": true,
+        "can_invite_users": true,
+        "can_post_stories": false,
+        "can_edit_stories": false,
+        "can_delete_stories": false,
+        "can_post_messages": true,
+        "can_edit_messages": true,
+        "can_pin_messages": true,
+        "can_manage_topics": false,
+        "can_manage_direct_messages": false,
+        "can_manage_tags": true,
+        "can_send_welcome_messages": true,
+        "custom_title": "Ops",
+        "can_book_meetings": true
+    });
+
+    let member: ChatMember =
+        serde_json::from_value(wire.clone()).expect("the complete shape decodes");
+    let ChatMember::Administrator(admin) = &member else {
+        panic!("status `administrator` must decode into the administrator shape");
+    };
+    assert!(!admin.can_be_edited);
+    assert_eq!(admin.is_anonymous, Some(true));
+    assert_eq!(admin.can_pin_messages, Some(true));
+    assert_eq!(admin.can_manage_topics, Some(false));
+    assert_eq!(admin.can_manage_direct_messages, Some(false));
+    assert_eq!(admin.custom_title.as_deref(), Some("Ops"));
+    assert_eq!(
+        admin.extra.get("can_book_meetings"),
+        Some(&json!(true)),
+        "a field no variant models is kept, not dropped"
+    );
+    assert_eq!(member.custom_title(), Some("Ops"));
+    assert_eq!(member.is_anonymous(), Some(true));
+
+    // Nothing is dropped on the way out either: a real payload — every
+    // mandatory member present — re-serialises to exactly what Telegram sent.
+    assert_eq!(serde_json::to_value(&member).unwrap(), wire);
+}
+
+/// One document shape per status, each decoding into its own variant and back
+/// to the same object. The compact payloads here omit the rights Telegram would
+/// send, and the crate's own output stays stable for them as well.
+#[test]
+fn chat_member_maps_every_status_to_its_shape() {
+    use telegram_api_client::ChatMember;
+
+    let cases = [
+        json!({"status":"creator","user":{"id":1},"is_anonymous":false,"custom_title":"Owner"}),
+        json!({"status":"administrator","user":{"id":1},"can_pin_messages":true,"custom_title":"Ops"}),
+        json!({"status":"member","user":{"id":1},"tag":"vip","until_date":1_700_000_001}),
+        json!({"status":"restricted","user":{"id":1},"tag":"muted","is_member":true,"until_date":0}),
+        json!({"status":"left","user":{"id":1}}),
+        json!({"status":"kicked","user":{"id":1},"until_date":1_700_000_002}),
+    ];
+
+    for wire in cases {
+        let member: ChatMember = serde_json::from_value(wire.clone()).expect("the shape decodes");
+        assert_eq!(
+            member.status().as_str(),
+            wire["status"].as_str().expect("a status string"),
+            "the variant must report the status it came from"
+        );
+        assert_eq!(member.user().id, 1);
+
+        // Decode → encode → decode is a fixed point: no information is lost.
+        let rendered = serde_json::to_value(&member).expect("the member serialises");
+        let reparsed: ChatMember =
+            serde_json::from_value(rendered).expect("own output parses back");
+        assert_eq!(reparsed, member, "serialisation lost information");
+    }
+
+    // The status word selects the variant, and `kicked` is the wire spelling of
+    // the ban.
+    for status in [
+        "creator",
+        "administrator",
+        "member",
+        "restricted",
+        "left",
+        "kicked",
+    ] {
+        let member: ChatMember =
+            serde_json::from_value(json!({"status": status, "user": {"id": 1}}))
+                .expect("the status decodes");
+        let shape = match &member {
+            ChatMember::Creator(_) => "creator",
+            ChatMember::Administrator(_) => "administrator",
+            ChatMember::Member(_) => "member",
+            ChatMember::Restricted(_) => "restricted",
+            ChatMember::Left(_) => "left",
+            ChatMember::Banned(_) => "kicked",
+            _ => "unknown",
+        };
+        assert_eq!(shape, status, "status `{status}` must pick its own shape");
+    }
+}
+
+/// `ChatMember::new` builds every status, and the member reports it back.
+#[test]
+fn chat_member_new_covers_every_status() {
+    use telegram_api_client::{ChatMember, ChatMemberStatus, User};
+
+    let user = User {
+        id: 7,
+        first_name: "Flo".to_string(),
+        ..User::default()
+    };
+    for status in [
+        ChatMemberStatus::Creator,
+        ChatMemberStatus::Administrator,
+        ChatMemberStatus::Member,
+        ChatMemberStatus::Restricted,
+        ChatMemberStatus::Left,
+        ChatMemberStatus::Kicked,
+        ChatMemberStatus::Unknown("ghost".to_string()),
+    ] {
+        let member = ChatMember::new(status.clone(), user.clone());
+        assert_eq!(member.status(), status);
+        assert_eq!(member.user().id, 7);
+        // A restricted member built this way carries no `is_member`, so it is
+        // not presence either.
+        let expected = matches!(
+            status,
+            ChatMemberStatus::Creator | ChatMemberStatus::Administrator | ChatMemberStatus::Member
+        );
+        assert_eq!(member.is_present(), expected, "presence of {status:?}");
+    }
+
+    // The emptiness of a default member: no status this crate knows, and not in
+    // the chat.
+    let empty = ChatMember::default();
+    assert_eq!(empty.status(), ChatMemberStatus::Unknown(String::new()));
+    assert!(!empty.is_present());
+    assert_eq!(
+        ChatMember::new(ChatMemberStatus::Left, user).is_anonymous(),
+        None
+    );
+}
+
+/// A status this crate does not model is a new value, not a missing one: it
+/// keeps its user and every other field, so nothing is lost on a round trip.
+#[test]
+fn chat_member_carries_an_unmodelled_status_with_its_payload() {
+    use telegram_api_client::{ChatMember, ChatMemberStatus};
+
+    let wire = json!({
+        "status": "ghost",
+        "user": {"id": 42, "first_name": "Flo"},
+        "is_anonymous": true,
+        "custom_title": "Casper",
+        "until_date": 1_700_000_005_i64,
+        "is_member": true,
+        "haunting_since": 1_700_000_000
+    });
+    let member: ChatMember =
+        serde_json::from_value(wire.clone()).expect("an unmodelled status decodes");
+    assert_eq!(
+        member.status(),
+        ChatMemberStatus::Unknown("ghost".to_string())
+    );
+    assert_eq!(member.user().id, 42);
+    assert!(!member.is_present(), "an unknown status is not presence");
+    // The accessors answer from what the unmodelled shape actually carried.
+    assert_eq!(member.is_anonymous(), Some(true));
+    assert_eq!(member.custom_title(), Some("Casper"));
+    assert_eq!(member.until_date(), Some(1_700_000_005));
+    assert_eq!(member.is_member(), Some(true));
+    assert_eq!(serde_json::to_value(&member).unwrap(), wire);
+
+    // No user, no member — a new status does not weaken the required pair.
+    assert!(serde_json::from_str::<ChatMember>(r#"{"status":"ghost"}"#).is_err());
+}
+
+/// The `is_member` bit decides presence for a restricted member, which is what
+/// the join/leave helpers are built on.
+#[test]
+fn restricted_presence_follows_is_member() {
+    use telegram_api_client::{ChatMember, ChatMemberStatus, User};
+
+    let present: ChatMember = serde_json::from_str(
+        r#"{"status":"restricted","user":{"id":1},"is_member":true,"can_send_messages":true}"#,
+    )
+    .unwrap();
+    let absent: ChatMember = serde_json::from_str(
+        r#"{"status":"restricted","user":{"id":1},"is_member":false,"can_send_messages":false}"#,
+    )
+    .unwrap();
+    assert!(present.is_present());
+    assert!(!absent.is_present());
+    assert_eq!(absent.is_member(), Some(false));
+
+    // A shape without the bit at all is not presence either.
+    assert!(!ChatMember::new(ChatMemberStatus::Restricted, User::default()).is_present());
+}
+
+/// Every member is decoded as the type the Bot API documents. The documented
+/// type decodes, a different one is an error instead of a silently defaulted
+/// member — the boundary pair for each member type's payload.
+#[test]
+fn chat_member_fields_keep_their_wire_types() {
+    use telegram_api_client::ChatMember;
+
+    let cases = [
+        (
+            r#"{"status":"restricted","user":{"id":1},"is_member":"yes"}"#,
+            r#"{"status":"restricted","user":{"id":1},"is_member":true}"#,
+        ),
+        (
+            r#"{"status":"restricted","user":{"id":1},"can_send_messages":1}"#,
+            r#"{"status":"restricted","user":{"id":1},"can_send_messages":false}"#,
+        ),
+        (
+            r#"{"status":"kicked","user":{"id":1},"until_date":"soon"}"#,
+            r#"{"status":"kicked","user":{"id":1},"until_date":0}"#,
+        ),
+        (
+            r#"{"status":"creator","user":{"id":1},"custom_title":16}"#,
+            r#"{"status":"creator","user":{"id":1},"custom_title":"Ops"}"#,
+        ),
+        (
+            r#"{"status":"administrator","user":{"id":1},"can_pin_messages":"true"}"#,
+            r#"{"status":"administrator","user":{"id":1},"can_pin_messages":true}"#,
+        ),
+        (
+            r#"{"status":"creator","user":{"id":1},"is_anonymous":"false"}"#,
+            r#"{"status":"creator","user":{"id":1},"is_anonymous":false}"#,
+        ),
+        (
+            r#"{"status":"member","user":{"id":1},"until_date":"never"}"#,
+            r#"{"status":"member","user":{"id":1},"until_date":0}"#,
+        ),
+    ];
+
+    for (wrong, right) in cases {
+        assert!(
+            serde_json::from_str::<ChatMember>(wrong).is_err(),
+            "{wrong} carries a value of the wrong type and must not decode"
+        );
+        assert!(
+            serde_json::from_str::<ChatMember>(right).is_ok(),
+            "{right} carries the documented type"
+        );
+    }
 }
 
 #[test]
