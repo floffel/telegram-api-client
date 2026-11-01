@@ -52,6 +52,19 @@ means for this API is spelled out in the README under
 - The reported hint stays **unclamped**: a `retry_after` longer than
   `RetryPolicy::max_delay` is still handed to the caller unchanged, because
   shortening a server hint is how a retry loop walks into a second 429.
+- **The deprecated `send_message` and `get_me` wrappers share the typed gate**
+  (#31). Both posted a hand-built body straight to the transport and returned
+  whatever came back: `send_message` skipped `SendMessage::validate`, so an empty
+  or over-long text reached the network instead of failing with
+  `Error::InvalidRequest`, and neither wrapper ran the envelope check, so a
+  `{"ok": false}` body — or an answer without `result` — was handed back as a
+  success when the transport yielded it. They now build the same request the
+  typed path builds, validate it first, and put the answer through the same
+  `result` gate before returning the envelope. Signatures, the posted bodies and
+  the raw-`Value` return type are unchanged; only the failures that used to
+  escape are errors now. The `MAX_MESSAGE_TEXT` boundary pair is tested on the
+  wrapper itself, and the envelope cases run against a transport that returns the
+  body verbatim.
 
 ## [0.1.8] - 2026-10-28
 

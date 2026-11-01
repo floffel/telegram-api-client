@@ -2,11 +2,12 @@
 //! and posts exactly the body the Bot API documents.
 
 use serde_json::{json, Value};
+use telegram_api_client::send::MAX_MESSAGE_TEXT;
 use telegram_api_client::{
     AnswerCallbackQuery, AnswerInlineQuery, BanChatMember, CopyMessage, DeleteMessage,
-    DeleteWebhook, EditMessageCaption, EditMessageReplyMarkup, EditMessageText, ForwardMessage,
-    GetChat, GetChatMember, GetFile, GetUpdates, InlineQueryResult, InputMedia, MenuButton,
-    MockReply, MockTransport, PinChatMessage, SendAnimation, SendAudio, SendChatAction,
+    DeleteWebhook, EditMessageCaption, EditMessageReplyMarkup, EditMessageText, Error,
+    ForwardMessage, GetChat, GetChatMember, GetFile, GetUpdates, InlineQueryResult, InputMedia,
+    MenuButton, MockReply, MockTransport, PinChatMessage, SendAnimation, SendAudio, SendChatAction,
     SendContact, SendDice, SendDocument, SendLocation, SendMediaGroup, SendMessage, SendPhoto,
     SendPoll, SendVenue, SendVideo, SendVoice, SetChatMenuButton, SetWebhook, TelegramClient,
     UnpinChatMessage,
@@ -610,4 +611,64 @@ async fn legacy_raw_methods_keep_their_signatures() {
     let me: Value = client.get_me().await.unwrap();
     assert_eq!(me["result"]["id"], 3);
     assert_eq!(transport.calls().len(), 2);
+}
+
+/// ... but they no longer skip validation: an unusable request is rejected
+/// before it is posted, exactly like `send_text(&SendMessage)` (#31).
+#[tokio::test]
+#[allow(deprecated)]
+async fn legacy_send_message_validates_before_posting() {
+    let transport = MockTransport::new();
+    let client = TelegramClient::new(TOKEN, transport.clone()).with_base_url("https://tg.test");
+
+    for (chat, text, field) in [
+        (CHAT, "", "text"),
+        (CHAT, " \n\t", "text"),
+        (0, "Hallo", "chat_id"),
+    ] {
+        let error = client.send_message(chat, text).await.unwrap_err();
+        assert!(
+            matches!(error, Error::InvalidRequest { field: actual, .. } if actual == field),
+            "expected InvalidRequest({field}), got {error:?}"
+        );
+    }
+    assert!(
+        transport.calls().is_empty(),
+        "a rejected request must not reach the transport"
+    );
+}
+
+/// Boundary pair for `MAX_MESSAGE_TEXT` on the deprecated wrapper: the limit
+/// itself is posted, one UTF-16 code unit more is not — Telegram counts units,
+/// so an emoji pair is over the limit too (#31).
+#[tokio::test]
+#[allow(deprecated)]
+async fn legacy_send_message_text_boundary_pair() {
+    let transport = MockTransport::new();
+    let client = TelegramClient::new(TOKEN, transport.clone()).with_base_url("https://tg.test");
+
+    let at_limit = "a".repeat(MAX_MESSAGE_TEXT);
+    let envelope = client.send_message(CHAT, &at_limit).await.unwrap();
+    assert_eq!(envelope["result"], json!({}), "still the raw envelope");
+    assert_call(
+        &transport,
+        "sendMessage",
+        json!({"chat_id": CHAT, "text": at_limit}),
+    );
+
+    for over in [
+        "a".repeat(MAX_MESSAGE_TEXT + 1),
+        "🎯".repeat(MAX_MESSAGE_TEXT / 2 + 1),
+    ] {
+        let error = client.send_message(CHAT, &over).await.unwrap_err();
+        assert!(
+            matches!(error, Error::InvalidRequest { field: "text", .. }),
+            "expected InvalidRequest(text), got {error:?}"
+        );
+    }
+    assert_eq!(
+        transport.calls().len(),
+        1,
+        "nothing over the limit may reach the transport"
+    );
 }
