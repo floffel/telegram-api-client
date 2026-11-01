@@ -624,3 +624,97 @@ async fn the_default_sleepers_both_complete() {
     };
     assert!(!policy.should_retry(1, &limited));
 }
+
+/// Every `ChatMember` shape and every accessor on it — plus both ways a caller
+/// can build one by hand — so a variant that stops answering, or answers for
+/// the wrong status, fails here first.
+#[test]
+fn chat_member_accessors_cover_every_shape() {
+    use serde_json::Map;
+    use telegram_api_client::{ChatMember, ChatMemberOwner, ChatMemberStatus, User};
+
+    let owner: ChatMember = serde_json::from_str(
+        r#"{"status":"creator","user":{"id":1},"is_anonymous":false,"custom_title":"Owner"}"#,
+    )
+    .unwrap();
+    assert_eq!(owner.status(), ChatMemberStatus::Creator);
+    assert_eq!(owner.user().id, 1);
+    assert_eq!(owner.is_anonymous(), Some(false));
+    assert_eq!(owner.custom_title(), Some("Owner"));
+    assert_eq!(owner.until_date(), None);
+    assert_eq!(owner.is_member(), None);
+    assert!(owner.is_present());
+
+    let admin: ChatMember =
+        serde_json::from_str(r#"{"status":"administrator","user":{"id":1},"is_anonymous":true}"#)
+            .unwrap();
+    assert_eq!(admin.status(), ChatMemberStatus::Administrator);
+    assert_eq!(admin.is_anonymous(), Some(true));
+    assert_eq!(admin.custom_title(), None);
+    assert_eq!(admin.until_date(), None);
+    assert!(admin.is_present());
+
+    let member: ChatMember =
+        serde_json::from_str(r#"{"status":"member","user":{"id":1},"until_date":1700000001}"#)
+            .unwrap();
+    assert_eq!(member.status(), ChatMemberStatus::Member);
+    assert_eq!(member.until_date(), Some(1_700_000_001));
+    assert_eq!(member.is_member(), None);
+    assert_eq!(member.custom_title(), None);
+    assert!(member.is_present());
+
+    let restricted: ChatMember = serde_json::from_str(
+        r#"{"status":"restricted","user":{"id":1},"is_member":true,"until_date":1700000002}"#,
+    )
+    .unwrap();
+    assert_eq!(restricted.status(), ChatMemberStatus::Restricted);
+    assert_eq!(restricted.until_date(), Some(1_700_000_002));
+    assert_eq!(restricted.is_member(), Some(true));
+    assert_eq!(restricted.custom_title(), None);
+    assert!(restricted.is_present());
+
+    let left: ChatMember = serde_json::from_str(r#"{"status":"left","user":{"id":1}}"#).unwrap();
+    assert_eq!(left.status(), ChatMemberStatus::Left);
+    assert_eq!(left.until_date(), None);
+    assert_eq!(left.is_member(), None);
+    assert_eq!(left.is_anonymous(), None);
+    assert!(!left.is_present());
+
+    let banned: ChatMember =
+        serde_json::from_str(r#"{"status":"kicked","user":{"id":1},"until_date":0}"#).unwrap();
+    assert_eq!(banned.status(), ChatMemberStatus::Kicked);
+    assert_eq!(banned.until_date(), Some(0));
+    assert_eq!(banned.custom_title(), None);
+    assert!(!banned.is_present());
+
+    // The payload structs are public: a caller builds the one it needs.
+    let built = ChatMember::Creator(ChatMemberOwner {
+        user: User {
+            id: 9,
+            ..User::default()
+        },
+        custom_title: Some("Owner".to_string()),
+        ..ChatMemberOwner::default()
+    });
+    assert_eq!(built.custom_title(), Some("Owner"));
+    assert!(built.is_present());
+
+    // The unmodelled shape keeps its payload; `status` and `user` inside `extra`
+    // are ignored, because the variant owns them.
+    let mut extra = Map::new();
+    extra.insert("status".to_string(), json!("member"));
+    extra.insert("user".to_string(), json!({"id": 99}));
+    extra.insert("haunting_since".to_string(), json!(5));
+    let ghost = ChatMember::Unknown {
+        status: ChatMemberStatus::Unknown("ghost".to_string()),
+        user: User {
+            id: 3,
+            ..User::default()
+        },
+        extra,
+    };
+    let rendered = serde_json::to_value(&ghost).unwrap();
+    assert_eq!(rendered["status"], "ghost");
+    assert_eq!(rendered["user"]["id"], 3);
+    assert_eq!(rendered["haunting_since"], 5);
+}
