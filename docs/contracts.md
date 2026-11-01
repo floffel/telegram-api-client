@@ -54,6 +54,44 @@ optional fields can be present in any given update."*
 | `subscription` | BotSubscriptionUpdated | `Update::subscription` |
 | `stopped_message_generation` | MessageGenerationStopped | `Update::stopped_message_generation` |
 
+## `ChatMember`
+
+Quote, "ChatMember": *"This object contains information about one member of a
+chat. Currently, the following 6 types of chat members are supported"* —
+`ChatMemberOwner`, `ChatMemberAdministrator`, `ChatMemberMember`,
+`ChatMemberRestricted`, `ChatMemberLeft`, `ChatMemberBanned`. Only `status` and
+`user` are common to all six, so the object is modelled as a status-tagged enum
+(`ChatMember`) with one payload struct per type, rather than as a struct that
+drops the rest. The `status` word selects the shape; the crate's variant names
+follow the payload types, so `"kicked"` decodes to `ChatMember::Banned`.
+
+| `status` | Payload type | Status-specific fields | Crate |
+| --- | --- | --- | --- |
+| `creator` | `ChatMemberOwner` | `is_anonymous`, `custom_title` | `ChatMember::Creator` |
+| `administrator` | `ChatMemberAdministrator` | `can_be_edited`, `is_anonymous`, `can_manage_chat`, `can_delete_messages`, `can_manage_video_chats`, `can_restrict_members`, `can_promote_members`, `can_change_info`, `can_invite_users`, `can_post_stories`, `can_edit_stories`, `can_delete_stories`, `can_post_messages`*, `can_edit_messages`*, `can_pin_messages`*, `can_manage_topics`*, `can_manage_direct_messages`*, `can_manage_tags`*, `can_send_welcome_messages`, `custom_title`* | `ChatMember::Administrator` |
+| `member` | `ChatMemberMember` | `tag`*, `until_date`* | `ChatMember::Member` |
+| `restricted` | `ChatMemberRestricted` | `tag`*, `is_member`, `can_send_messages`, `can_send_audios`, `can_send_documents`, `can_send_photos`, `can_send_videos`, `can_send_video_notes`, `can_send_voice_notes`, `can_send_polls`, `can_send_other_messages`, `can_add_web_page_previews`, `can_react_to_messages`, `can_edit_tag`, `can_change_info`, `can_invite_users`, `can_pin_messages`, `can_manage_topics`, `until_date` | `ChatMember::Restricted` |
+| `left` | `ChatMemberLeft` | — | `ChatMember::Left` |
+| `kicked` | `ChatMemberBanned` | `until_date` | `ChatMember::Banned` |
+
+`*` optional in the Bot API. Every field is `user` plus the ones listed.
+
+| Rule | Modelled as |
+| --- | --- |
+| `status` and `user` are mandatory | absence or `null` is a decode error (`Error::Payload`), never a default member (#26) |
+| a status the crate does not model | `ChatMember::Unknown { status, user, extra }` — carried, not rejected |
+| a field no variant models | that shape's `extra` map, re-serialised unchanged |
+| an absent mandatory `can_*` right | `false` (under-reporting, never an invented permission) |
+| an absent optional `can_*` right | `None` |
+| `until_date` | the wire value, `0` meaning "forever" — not filtered out |
+| presence | `is_present()`: true for creator/administrator/member, `is_member` for restricted, false for left/kicked/unknown |
+
+| Item | Value |
+| --- | --- |
+| Source URL | <https://core.telegram.org/bots/api#chatmember> |
+| Fetched | 2026-11-01 |
+| Fixtures | `tests/edge_cases.rs` (all six shapes, the required pair, an unmodelled status, per-field types) and `tests/properties.rs` (round trip) |
+
 ## `PollMedia`
 
 Quote, "PollMedia": *"At most one of the optional fields can be present in any
