@@ -368,6 +368,13 @@ pub trait Transport {
     /// Whatever the implementation produces: network failures, non-JSON
     /// bodies, and Bot API `ok: false` answers.
     ///
+    /// A response is parsed before the client can look at it, which is why the
+    /// size bound belongs here: an implementation should refuse a body above
+    /// its documented limit *before* decoding it, as the bundled
+    /// `ReqwestTransport` does with `MAX_RESPONSE_BYTES`, and report
+    /// [`Error::ResponseTooLarge`] rather than allocating it. Once a body is a
+    /// `serde_json::Value`, its size cannot be checked any more.
+    ///
     /// The client decides about retries from the *phase* of the failure, so say
     /// which one it was:
     ///
@@ -430,11 +437,38 @@ pub trait Transport {
     }
 }
 
+/// Largest response body the bundled [`ReqwestTransport`] reads, in bytes.
+///
+/// The limit is 16 MiB. Telegram's own answers are far smaller — `getUpdates`
+/// returns at most 100 updates per call — so this leaves room for a generous
+/// backlog while keeping a proxy, a gateway or a custom base URL from making
+/// the client parse an arbitrarily large body.
+///
+/// The bound has to sit in front of the parser: once a body has become a
+/// `serde_json::Value`, its size can no longer be checked, because the memory
+/// is already spent. The transport therefore refuses a declared
+/// `Content-Length` above the limit before reading anything, and counts the
+/// body while it streams in, so a chunked answer (or one whose header
+/// understates it) stops at the limit instead of growing past it.
+/// `ReqwestTransport::with_max_response_bytes` installs a different limit; the
+/// limit is inclusive, so a body of exactly this many bytes is still read.
+///
+/// ```
+/// use telegram_api_client::{ReqwestTransport, MAX_RESPONSE_BYTES};
+///
+/// assert_eq!(MAX_RESPONSE_BYTES, 16 * 1024 * 1024);
+/// assert_eq!(ReqwestTransport::new().max_response_bytes(), MAX_RESPONSE_BYTES);
+/// ```
+#[cfg(feature = "http")]
+pub const MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
+
 /// `reqwest` transport behind the `http` feature.
 ///
 /// Maps `429` answers to [`crate::Error::RateLimited`] (keeping
-/// `parameters.retry_after`), 5xx to a retryable [`crate::Error::Api`], and
-/// non-JSON bodies to [`crate::Error::Payload`].
+/// `parameters.retry_after`), 5xx to a retryable [`crate::Error::Api`],
+/// non-JSON bodies to [`crate::Error::Payload`], and a body above
+/// [`MAX_RESPONSE_BYTES`] to [`crate::Error::ResponseTooLarge`] — dropped
+/// unread, never parsed.
 #[cfg(feature = "http")]
 #[cfg_attr(
     feature = "http",
@@ -448,17 +482,68 @@ client.get_me().await?;
 ```
 "#
 )]
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct ReqwestTransport {
     client: reqwest::Client,
+    max_response_bytes: usize,
+}
+
+#[cfg(feature = "http")]
+impl Default for ReqwestTransport {
+    fn default() -> Self {
+        Self {
+            client: reqwest::Client::default(),
+            max_response_bytes: MAX_RESPONSE_BYTES,
+        }
+    }
 }
 
 #[cfg(feature = "http")]
 impl ReqwestTransport {
-    /// Creates a transport with a default client.
+    /// Creates a transport with a default client and the default response
+    /// limit ([`MAX_RESPONSE_BYTES`]).
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Replaces the response limit, in bytes.
+    ///
+    /// The limit is inclusive: a body of exactly `max_bytes` bytes is read and
+    /// parsed, one more is [`crate::Error::ResponseTooLarge`]. A value of `0`
+    /// therefore refuses every non-empty body — useful to prove the path, not a
+    /// way to disable the bound, which has no off switch.
+    ///
+    /// ```
+    /// use telegram_api_client::{ReqwestTransport, MAX_RESPONSE_BYTES};
+    ///
+    /// let transport = ReqwestTransport::new().with_max_response_bytes(4096);
+    /// assert_eq!(transport.max_response_bytes(), 4096);
+    ///
+    /// // A fresh transport always starts at the documented default.
+    /// assert_eq!(
+    ///     ReqwestTransport::default().max_response_bytes(),
+    ///     MAX_RESPONSE_BYTES,
+    /// );
+    /// ```
+    #[must_use]
+    pub fn with_max_response_bytes(mut self, max_bytes: usize) -> Self {
+        self.max_response_bytes = max_bytes;
+        self
+    }
+
+    /// The limit every response body is measured against before it is parsed.
+    ///
+    /// ```
+    /// use telegram_api_client::{ReqwestTransport, MAX_RESPONSE_BYTES};
+    ///
+    /// let transport = ReqwestTransport::new();
+    /// assert_eq!(transport.max_response_bytes(), MAX_RESPONSE_BYTES);
+    /// assert_eq!(transport.with_max_response_bytes(1).max_response_bytes(), 1);
+    /// ```
+    #[must_use]
+    pub fn max_response_bytes(&self) -> usize {
+        self.max_response_bytes
     }
 }
 
@@ -466,7 +551,7 @@ impl ReqwestTransport {
 impl Transport for ReqwestTransport {
     async fn post_json(&self, url: &str, body: &serde_json::Value) -> Result<serde_json::Value> {
         let request = self.client.post(url).json(body);
-        execute(request, url).await
+        execute(request, url, self.max_response_bytes).await
     }
 
     async fn post_multipart(&self, url: &str, form: &MultipartForm) -> Result<serde_json::Value> {
@@ -479,20 +564,54 @@ impl Transport for ReqwestTransport {
                 format!("multipart/form-data; boundary={boundary}"),
             )
             .body(bytes);
-        execute(request, url).await
+        execute(request, url, self.max_response_bytes).await
     }
 }
 
 /// Sends a prepared request and classifies whatever comes back.
 #[cfg(feature = "http")]
-async fn execute(request: reqwest::RequestBuilder, url: &str) -> Result<serde_json::Value> {
-    let response = request
+async fn execute(
+    request: reqwest::RequestBuilder,
+    url: &str,
+    max_response_bytes: usize,
+) -> Result<serde_json::Value> {
+    let mut response = request
         .send()
         .await
         .map_err(|error| classify_send_error(url, error))?;
 
     let status = response.status().as_u16();
-    let text = response.text().await.map_err(|error| {
+    let body = read_body(&mut response, url, max_response_bytes).await?;
+    decode_response(&method_of(url), status, &body, max_response_bytes)
+}
+
+/// Reads a response body without ever holding more than `max_bytes` of it.
+///
+/// The body is kept as bytes, not as a `String`: one buffer, so a large answer
+/// is not copied once more on its way to the parser (issue #32).
+///
+/// Two gates, because a declared length can be missing or wrong: a
+/// `Content-Length` above the limit is refused before a byte is read, and the
+/// bytes that actually arrive are counted while they stream in, so a chunked
+/// answer — or one whose header understates it — stops at the limit instead of
+/// growing past it.
+#[cfg(feature = "http")]
+async fn read_body(
+    response: &mut reqwest::Response,
+    url: &str,
+    max_bytes: usize,
+) -> Result<Vec<u8>> {
+    if let Some(declared) = response.content_length() {
+        if declared > max_bytes as u64 {
+            return Err(Error::ResponseTooLarge {
+                method: method_of(url),
+                limit: max_bytes,
+            });
+        }
+    }
+
+    let mut body: Vec<u8> = Vec::new();
+    while let Some(chunk) = response.chunk().await.map_err(|error| {
         // The request was accepted (or not) — we just lost the answer. That is
         // the textbook ambiguous case: never silently retried.
         Error::ambiguous(
@@ -500,9 +619,17 @@ async fn execute(request: reqwest::RequestBuilder, url: &str) -> Result<serde_js
             format!("connection broke while reading the response: {error}"),
         )
         .with_source(error)
-    })?;
-
-    decode_response(status, &text)
+    })? {
+        // Saturating: a hostile chunk must not wrap the sum into a small value.
+        if body.len().saturating_add(chunk.len()) > max_bytes {
+            return Err(Error::ResponseTooLarge {
+                method: method_of(url),
+                limit: max_bytes,
+            });
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
 }
 
 /// Splits a connection failure into "nothing was written" and "we cannot tell".
@@ -525,18 +652,39 @@ fn classify_send_error(url: &str, error: reqwest::Error) -> Error {
 }
 
 /// Turns an HTTP status plus body into a value or a typed error.
+///
+/// The body arrives as bytes and is parsed from the same buffer: no intermediate
+/// `String` copy of an answer that may be megabytes long.
 #[cfg(feature = "http")]
-fn decode_response(status: u16, text: &str) -> Result<serde_json::Value> {
-    let Ok(value) = serde_json::from_str::<Value>(text) else {
+fn decode_response(
+    method: &str,
+    status: u16,
+    body: &[u8],
+    max_bytes: usize,
+) -> Result<serde_json::Value> {
+    // Defence in depth: `read_body` already refuses to grow past the limit, so
+    // this only catches a caller that reached the parser another way. It costs
+    // a comparison, and it is the boundary the unit tests pin.
+    if body.len() > max_bytes {
+        return Err(Error::ResponseTooLarge {
+            method: method.to_string(),
+            limit: max_bytes,
+        });
+    }
+
+    let Ok(value) = serde_json::from_slice::<Value>(body) else {
         // A proxy or overload page may answer 429/5xx without JSON; keep the
         // status meaningful instead of reporting an opaque parse error.
         return Err(
             Error::from_api_body(&Value::Null, Some(status)).unwrap_or_else(|| Error::Payload {
                 message: format!(
                     "non-JSON response (status {status}): {}",
-                    truncate(text, 200)
+                    // Only a few hundred characters are quoted, so a 16 MiB
+                    // HTML error page is not decoded into a `String` just to be
+                    // cut back down to 200 characters.
+                    truncate(&String::from_utf8_lossy(&body[..body.len().min(1024)]), 200)
                 ),
-                source: serde_json::from_str::<Value>(text).err(),
+                source: serde_json::from_slice::<Value>(body).err(),
             }),
         );
     };
@@ -927,20 +1075,42 @@ impl MockTransport {
 /// They live here, not in `tests/`, because the functions are private.
 #[cfg(all(test, feature = "http"))]
 mod tests {
-    use super::{decode_response, method_of, truncate};
+    use super::{decode_response, method_of, truncate, MAX_RESPONSE_BYTES};
     use crate::error::Error;
+
+    /// A successful body, under the default limit.
+    fn decode_ok(body: &[u8]) -> serde_json::Value {
+        match decode_response("getMe", 200, body, MAX_RESPONSE_BYTES) {
+            Ok(value) => value,
+            Err(error) => panic!("expected a value, got {error:?}"),
+        }
+    }
+
+    /// A JSON answer of exactly `len` bytes.
+    fn body_of_len(len: usize) -> Vec<u8> {
+        // `{"ok":true,"result":"..."}` — the padding goes inside the string, so
+        // the total length is exact and the body stays valid JSON.
+        const SHELL: usize = r#"{"ok":true,"result":""}"#.len();
+        let mut body = String::from(r#"{"ok":true,"result":""#);
+        body.push_str(&"a".repeat(len.saturating_sub(SHELL)));
+        body.push_str(r#""}"#);
+        assert_eq!(body.len(), len, "the fixture is exactly the asked-for size");
+        body.into_bytes()
+    }
 
     #[test]
     fn a_successful_body_decodes() {
-        let value = decode_response(200, r#"{"ok":true,"result":{"message_id":7}}"#).unwrap();
+        let value = decode_ok(br#"{"ok":true,"result":{"message_id":7}}"#);
         assert_eq!(value["result"]["message_id"], 7);
     }
 
     #[test]
     fn an_ok_false_body_becomes_an_api_error() {
         let error = decode_response(
+            "sendMessage",
             400,
-            r#"{"ok":false,"error_code":400,"description":"Bad Request: chat not found"}"#,
+            br#"{"ok":false,"error_code":400,"description":"Bad Request: chat not found"}"#,
+            MAX_RESPONSE_BYTES,
         )
         .unwrap_err();
         assert!(matches!(error, Error::Api { code: 400, .. }));
@@ -950,8 +1120,10 @@ mod tests {
     #[test]
     fn a_429_body_keeps_its_retry_hint() {
         let error = decode_response(
+            "sendMessage",
             429,
-            r#"{"ok":false,"error_code":429,"description":"Too Many Requests","parameters":{"retry_after":9}}"#,
+            br#"{"ok":false,"error_code":429,"description":"Too Many Requests","parameters":{"retry_after":9}}"#,
+            MAX_RESPONSE_BYTES,
         )
         .unwrap_err();
         assert_eq!(error.retry_after(), Some(std::time::Duration::from_secs(9)));
@@ -959,15 +1131,36 @@ mod tests {
 
     #[test]
     fn a_non_json_5xx_keeps_the_status() {
-        let error = decode_response(502, "<html>bad gateway</html>").unwrap_err();
+        let error = decode_response(
+            "getMe",
+            502,
+            b"<html>bad gateway</html>",
+            MAX_RESPONSE_BYTES,
+        )
+        .unwrap_err();
         assert!(matches!(error, Error::Api { code: 502, .. }), "{error:?}");
     }
 
     #[test]
     fn a_non_json_200_is_a_payload_error() {
-        let error = decode_response(200, "not json").unwrap_err();
+        let error = decode_response("getMe", 200, b"not json", MAX_RESPONSE_BYTES).unwrap_err();
         assert!(matches!(error, Error::Payload { .. }), "{error:?}");
         assert!(error.to_string().contains("not json"));
+    }
+
+    #[test]
+    fn a_non_utf8_body_is_reported_not_dropped() {
+        // A proxy page in Latin-1: still an error message worth reading, and
+        // never a panic while the text is made printable.
+        let error = decode_response(
+            "getMe",
+            200,
+            b"<html>gr\xfc\xdfe</html>",
+            MAX_RESPONSE_BYTES,
+        )
+        .unwrap_err();
+        assert!(matches!(error, Error::Payload { .. }), "{error:?}");
+        assert!(error.to_string().contains("gr"));
     }
 
     #[test]
@@ -992,7 +1185,56 @@ mod tests {
     #[test]
     fn the_http_feature_keeps_the_status_for_a_boundary_case() {
         // A 500 with a JSON body but no `ok` field: the status decides.
-        let error = decode_response(500, r#"{"message":"boom"}"#).unwrap_err();
+        let error = decode_response("getMe", 500, br#"{"message":"boom"}"#, MAX_RESPONSE_BYTES)
+            .unwrap_err();
         assert!(matches!(error, Error::Api { code: 500, .. }), "{error:?}");
+    }
+
+    // ---- the response limit: the boundary pair ------------------------------
+
+    #[test]
+    fn a_body_exactly_at_the_limit_is_parsed() {
+        let limit = 64;
+        let body = body_of_len(limit);
+        let value = match decode_response("getMe", 200, &body, limit) {
+            Ok(value) => value,
+            Err(error) => panic!("a body of exactly {limit} bytes must pass: {error:?}"),
+        };
+        assert_eq!(value["ok"], true, "the inclusive limit still decodes");
+    }
+
+    #[test]
+    fn a_body_one_byte_over_the_limit_is_refused_unread() {
+        let limit = 64;
+        let body = body_of_len(limit + 1);
+        let error = decode_response("getMe", 200, &body, limit).unwrap_err();
+        match &error {
+            Error::ResponseTooLarge { method, limit } => {
+                assert_eq!(method, "getMe");
+                assert_eq!(*limit, 64, "the error names the limit that applied");
+            }
+            other => panic!("expected ResponseTooLarge, got {other:?}"),
+        }
+        assert!(
+            !error.is_retryable(),
+            "the same body would be too large again"
+        );
+        assert!(error.is_ambiguous(), "the answer arrived and was dropped");
+    }
+
+    #[test]
+    fn the_limit_is_checked_before_the_body_is_even_parsed() {
+        // Garbage over the limit is a size error, not a parse error: nothing
+        // reads or allocates the content first.
+        let error = decode_response("sendPhoto", 200, &[0xff_u8; 32], 16).unwrap_err();
+        assert!(matches!(error, Error::ResponseTooLarge { .. }), "{error:?}");
+    }
+
+    #[test]
+    fn an_empty_body_is_within_every_limit() {
+        // The check is `> limit`, so a zero-byte answer is judged on its
+        // content (here: not JSON) rather than on its size, even at limit 0.
+        let error = decode_response("getMe", 200, b"", 0).unwrap_err();
+        assert!(matches!(error, Error::Payload { .. }), "{error:?}");
     }
 }

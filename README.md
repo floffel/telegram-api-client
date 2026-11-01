@@ -184,12 +184,14 @@ key to distinguish the last two after the fact:
 | 5xx on a `get*` method | read failed, nothing changed | retried automatically (idempotent) | nothing |
 | 5xx on a state-changing method | the message **may** have been accepted | `Error::Ambiguous`, **never retried** | decide from your own ledger |
 | timeout / reset after the write (`Error::Ambiguous`) | unknown | `Error::Ambiguous`, **never retried** | decide from your own ledger |
+| answer above `MAX_RESPONSE_BYTES` (`Error::ResponseTooLarge`) | answered, body dropped unread | returned immediately, **never retried** | decide from your own ledger |
 | 4xx (400/401/403/404/409, …) | rejected, nothing happened | returned immediately | fix the request |
 
 Custom transports report the phase through three variants: `Error::NotSent`
 (nothing written), `Error::Ambiguous` (written, outcome unknown) and — only if
 the transport genuinely cannot tell — `Error::Transport`, which the client
-resolves per method.
+resolves per method. `ResponseTooLarge` shares the `is_ambiguous()` answer with
+`Error::Ambiguous`: the answer arrived, so the request reached the bot.
 
 So the crate is **at-most-once by default for ambiguous failures**: a message
 is never silently duplicated, and a call never becomes at-least-once behind your
@@ -211,7 +213,8 @@ assert!(read.is_retryable() && !read.is_ambiguous());
 assert!(!RetryPolicy::default().should_retry(1, &send));
 ```
 
-Rule of thumb for callers: on `Error::Ambiguous`, look your own record up (did
+Rule of thumb for callers: on `Error::Ambiguous` or `Error::ResponseTooLarge`,
+look your own record up (did
 I already see a message carrying this correlation payload?), then either accept
 the uncertainty or re-send deliberately. Telegram has no
 `biz_opaque_callback_data`-style dedupe field, so the usual technique is a
@@ -298,6 +301,19 @@ compiling and fails loudly instead of silently dropping the file.
   `0` from either source means "no hint", never "retry immediately".
   `RetryPolicy::delay_for_error` prefers that hint over its own exponential curve
   and hands the error back instead of shortening a hint longer than `max_delay`.
+- **Bounded responses.** The bundled `ReqwestTransport` reads at most
+  `MAX_RESPONSE_BYTES` (16 MiB, `with_max_response_bytes` to change it) and
+  reports anything larger as `Error::ResponseTooLarge` instead of parsing it.
+  The bound sits in front of the parser because a body that has become a
+  `serde_json::Value` can no longer be measured — the memory is already spent.
+  It is enforced twice, so neither a missing nor a lying `Content-Length` gets
+  through: a declared length above the limit is refused before a byte is read,
+  and the arriving bytes are counted, so a chunked answer stops at the limit.
+  The limit is inclusive and `Error::ResponseTooLarge` is ambiguous, not
+  retryable: the Bot API answered, so a send was most likely applied.
+- **One copy of an answer.** `result` is moved out of the envelope and into the
+  decoder (`serde_json::Value::remove`), never cloned, so a large answer is held
+  once plus its decoded form rather than three times.
 - **Secrets.** The bot token never appears in `Debug` (`TelegramClient`,
   `SetWebhook`), comparisons are constant time (`subtle`), and an empty
   configured secret is a hard error rather than a wildcard.

@@ -8,6 +8,24 @@ means for this API is spelled out in the README under
 
 ## [Unreleased]
 
+### Added
+
+- **`MAX_RESPONSE_BYTES`: a response body is bounded before it is parsed**
+  (#32). The bundled `ReqwestTransport` now reads at most 16 MiB and reports a
+  larger answer as the new `Error::ResponseTooLarge { method, limit }` instead
+  of decoding it. The bound has to sit in front of the parser — once a body is a
+  `serde_json::Value` its size can no longer be checked, the memory is already
+  spent — so it is enforced twice: a declared `Content-Length` above the limit
+  is refused before a byte is read, and the bytes that actually arrive are
+  counted while they stream in, so a chunked answer (or one whose header
+  understates it) stops at the limit. The limit is inclusive and has no off
+  switch; `ReqwestTransport::with_max_response_bytes` installs a different one
+  and `max_response_bytes()` reports it. `Error::is_ambiguous()` answers `true`
+  for the new variant and `is_retryable()` answers `false`: the Bot API did
+  answer, so a send was most likely applied, while retrying would fetch the same
+  oversized body again. `Error` is `#[non_exhaustive]`, so existing matches keep
+  compiling.
+
 ### Changed
 
 - **Numeric media members are unsigned, and a negative one is a parse error**
@@ -26,6 +44,13 @@ means for this API is spelled out in the README under
 
 ### Fixed
 
+- **An answer is no longer copied before it is decoded** (#32). The client
+  pulled `result` out of the envelope with `.cloned()`, duplicating the whole
+  subtree before deserializing: a large — or hostile — answer cost its own size
+  twice, and the copy happened before any size check could apply. `result` is
+  now removed from the envelope and moved into the decoder, so the tree exists
+  once. The transport-side limit above is the other half: nothing downstream can
+  bound a value tree, so the bound has to be a byte count before parsing.
 - **A `getChatMember` result missing `status` or `user` is a decode error** (#26).
   Both members are mandatory in the Bot API, but `ChatMember` marked them
   `serde(default)`, so a truncated or malformed payload decoded into a member
