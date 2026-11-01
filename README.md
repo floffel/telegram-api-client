@@ -185,6 +185,14 @@ key to distinguish the last two after the fact:
 | 5xx on a state-changing method | the message **may** have been accepted | `Error::Ambiguous`, **never retried** | decide from your own ledger |
 | timeout / reset after the write (`Error::Ambiguous`) | unknown | `Error::Ambiguous`, **never retried** | decide from your own ledger |
 | 4xx (400/401/403/404/409, …) | rejected, nothing happened | returned immediately | fix the request |
+| `{"ok": false}` body returned as `Ok` by a transport | same as the matching HTTP status | classified by `error_code` inside the retry loop, exactly like a status | same as the matching row above |
+| `ok: true` but the `result` is missing or does not decode | the request **was** processed; only the answer was lost | `Error::Ambiguous` for a state-changing method (with the decoding error as its source), the decoding error itself for a `get*` | decide from your own ledger |
+
+Automatic retry lives in one place and sees both shapes of failure: an error the
+transport raised, and a body that says `ok: false` after a successful round trip.
+A `Transport` may therefore hand back the envelope unjudged — a thin HTTP wrapper
+that does not call `Error::from_api_body` gets the same retry and ambiguity
+decisions as one that does.
 
 Custom transports report the phase through three variants: `Error::NotSent`
 (nothing written), `Error::Ambiguous` (written, outcome unknown) and — only if

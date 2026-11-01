@@ -8,6 +8,8 @@
 //!   message may already be delivered. It surfaces as [`Error::Ambiguous`] and
 //!   is never retried, whatever the attempt budget says.
 
+use std::collections::VecDeque;
+use std::error::Error as StdError;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
@@ -15,8 +17,8 @@ use std::time::Duration;
 
 use serde_json::{json, Value};
 use telegram_api_client::{
-    Error, GetChat, MockReply, MockTransport, RetryPolicy, SendMessage, SendPhoto, Sleeper,
-    TelegramClient, UploadFile,
+    Error, GetChat, MockReply, MockTransport, MultipartForm, Result, RetryPolicy, SendMessage,
+    SendPhoto, Sleeper, TelegramClient, Transport, UploadFile,
 };
 
 /// Records every delay it was asked to wait, and never waits.
@@ -422,4 +424,328 @@ fn a_custom_budget_is_used() {
         RetryPolicy::new(7, Duration::from_millis(1), Duration::from_secs(1)),
     );
     assert_eq!(client.retry_policy().max_attempts, 7);
+}
+
+// ---- body-level errors (issue #29) --------------------------------------
+//
+// A `Transport` is only obliged to deliver the bytes it received. Handing the
+// decoded `{"ok": false, ...}` envelope back as `Ok` is legal — a thin HTTP
+// wrapper does exactly that — and the client owed such an answer the same
+// classification it gives an error the transport raised itself. Before #29 the
+// envelope was judged *after* the retry loop, so a body-level 429 was never
+// retried, a body-level 5xx on a send stayed a retryable `Api` error rather
+// than `Ambiguous`, and an unreadable `result` claimed the request had failed.
+
+/// Replays decoded envelopes as `Ok`, the way a transport that does not judge
+/// the body would, and counts the calls so a retry is visible.
+#[derive(Clone, Default)]
+struct RawEnvelope {
+    inner: Arc<Mutex<RawInner>>,
+}
+
+#[derive(Default)]
+struct RawInner {
+    calls: usize,
+    queue: VecDeque<Value>,
+}
+
+impl RawEnvelope {
+    fn new(replies: impl IntoIterator<Item = Value>) -> Self {
+        let this = Self::default();
+        this.inner.lock().expect("raw lock").queue.extend(replies);
+        this
+    }
+
+    fn calls(&self) -> usize {
+        self.inner.lock().expect("raw lock").calls
+    }
+
+    /// The next queued envelope; once the queue is empty the Bot API succeeds
+    /// with an empty result, so an over-retry shows up as a success.
+    fn next(&self) -> Value {
+        let mut inner = self.inner.lock().expect("raw lock");
+        inner.calls += 1;
+        inner
+            .queue
+            .pop_front()
+            .unwrap_or_else(|| json!({ "ok": true, "result": {} }))
+    }
+}
+
+impl Transport for RawEnvelope {
+    fn post_json(&self, _url: &str, _body: &Value) -> impl Future<Output = Result<Value>> {
+        std::future::ready(Ok(self.next()))
+    }
+
+    fn post_multipart(
+        &self,
+        _url: &str,
+        _form: &MultipartForm,
+    ) -> impl Future<Output = Result<Value>> {
+        std::future::ready(Ok(self.next()))
+    }
+}
+
+/// A raw-envelope client with a recording sleeper, retries on.
+fn raw_client(
+    replies: impl IntoIterator<Item = Value>,
+) -> (TelegramClient<RawEnvelope>, RawEnvelope, RecordingSleeper) {
+    let transport = RawEnvelope::new(replies);
+    let sleeper = RecordingSleeper::default();
+    let client = TelegramClient::new("123:ABC", transport.clone()).with_sleeper(sleeper.clone());
+    (client, transport, sleeper)
+}
+
+/// A 429 body, as a transport that does not classify would return it.
+fn limited_body(retry_after: u64) -> Value {
+    json!({
+        "ok": false,
+        "error_code": 429,
+        "description": format!("Too Many Requests: retry after {retry_after}"),
+        "parameters": { "retry_after": retry_after },
+    })
+}
+
+/// An error body with a numeric code.
+fn failed_body(code: i64) -> Value {
+    json!({ "ok": false, "error_code": code, "description": "failure" })
+}
+
+#[tokio::test]
+async fn a_body_level_429_is_retried_and_honours_retry_after() {
+    let (client, transport, sleeper) =
+        raw_client([limited_body(3), json!({ "ok": true, "result": message() })]);
+
+    let sent = client
+        .send_message_request(&SendMessage::new(-1001, "hi"))
+        .await
+        .expect("the second attempt succeeds");
+
+    assert_eq!(sent.message_id, 7);
+    assert_eq!(
+        transport.calls(),
+        2,
+        "a 429 body is a rate limit, not a terminal error"
+    );
+    assert_eq!(
+        sleeper.delays(),
+        vec![Duration::from_secs(3)],
+        "the body's hint is honoured like any other"
+    );
+}
+
+#[tokio::test]
+async fn a_body_level_429_loop_stops_at_the_attempt_budget() {
+    let (client, transport, _sleeper) = raw_client([
+        limited_body(1),
+        limited_body(1),
+        limited_body(1),
+        limited_body(1),
+    ]);
+
+    let error = client
+        .send_message_request(&SendMessage::new(-1001, "hi"))
+        .await
+        .expect_err("every attempt is limited");
+
+    assert!(matches!(error, Error::RateLimited { .. }), "{error:?}");
+    assert_eq!(
+        transport.calls(),
+        3,
+        "the default budget is 3 attempts, body-level or not"
+    );
+}
+
+#[tokio::test]
+async fn a_body_level_5xx_on_a_send_is_ambiguous_and_costs_one_call() {
+    let (client, transport, sleeper) = raw_client([failed_body(502)]);
+
+    let error = client
+        .send_message_request(&SendMessage::new(-1001, "hi"))
+        .await
+        .expect_err("a 5xx body must not look like a retryable error");
+
+    match &error {
+        Error::Ambiguous { method, .. } => assert_eq!(method, "sendMessage"),
+        other => panic!("expected Ambiguous, got {other:?}"),
+    }
+    assert!(!error.is_retryable(), "the message may already be out");
+    assert_eq!(transport.calls(), 1, "no automatic retry");
+    assert!(sleeper.delays().is_empty(), "nothing to wait for");
+}
+
+#[tokio::test]
+async fn a_body_level_5xx_on_a_read_is_retried() {
+    let (client, transport, _sleeper) =
+        raw_client([failed_body(503), json!({ "ok": true, "result": chat() })]);
+
+    let fetched = client
+        .get_chat(&GetChat::new(-1001))
+        .await
+        .expect("reads are idempotent, whichever shape the 5xx arrives in");
+
+    assert_eq!(fetched.label(), "Test");
+    assert_eq!(transport.calls(), 2);
+}
+
+#[tokio::test]
+async fn a_body_level_5xx_on_an_upload_is_ambiguous_too() {
+    let (client, transport, _sleeper) = raw_client([failed_body(500)]);
+    let upload = UploadFile::new("a.png", vec![0x89, 0x50]).with_mime("image/png");
+
+    let error = client
+        .send_photo(&SendPhoto::new(-1001, "x").with_upload(upload))
+        .await
+        .expect_err("the multipart path classifies the envelope as well");
+
+    assert!(error.is_ambiguous(), "{error:?}");
+    assert_eq!(transport.calls(), 1, "one delivery attempt, no retry");
+}
+
+#[tokio::test]
+async fn the_body_level_5xx_boundary_is_500() {
+    // 499 is still a client-side failure: nothing was processed, so it is a
+    // terminal `Api` error and is not retried.
+    let (client, transport, _sleeper) = raw_client([failed_body(499)]);
+    let error = client
+        .send_message_request(&SendMessage::new(-1001, "hi"))
+        .await
+        .expect_err("499 is terminal");
+    assert!(matches!(error, Error::Api { code: 499, .. }), "{error:?}");
+    assert!(!error.is_ambiguous() && !error.is_retryable());
+    assert_eq!(transport.calls(), 1);
+
+    // 500 is the first server-side code: the send may have happened, so it is
+    // ambiguous rather than retryable.
+    let (client, transport, _sleeper) = raw_client([failed_body(500)]);
+    let error = client
+        .send_message_request(&SendMessage::new(-1001, "hi"))
+        .await
+        .expect_err("500 is ambiguous for a send");
+    assert!(error.is_ambiguous(), "{error:?}");
+    assert_eq!(transport.calls(), 1);
+}
+
+#[tokio::test]
+async fn a_body_level_hint_above_max_delay_is_handed_back() {
+    // Boundary pair on the default 30 s ceiling: 30 s is retried, 31 s is not.
+    let (client, transport, sleeper) =
+        raw_client([limited_body(30), json!({ "ok": true, "result": message() })]);
+    client
+        .send_message_request(&SendMessage::new(-1001, "hi"))
+        .await
+        .expect("a hint at the ceiling is waited out");
+    assert_eq!(transport.calls(), 2);
+    assert_eq!(sleeper.delays(), vec![Duration::from_secs(30)]);
+
+    let (client, transport, _sleeper) = raw_client([limited_body(31)]);
+    let error = client
+        .send_message_request(&SendMessage::new(-1001, "hi"))
+        .await
+        .expect_err("a hint past the ceiling is not shortened");
+    assert_eq!(error.retry_after(), Some(Duration::from_secs(31)));
+    assert_eq!(transport.calls(), 1, "no early retry");
+}
+
+#[tokio::test]
+async fn a_send_whose_result_cannot_be_decoded_is_ambiguous_and_keeps_the_cause() {
+    let (client, transport, _sleeper) = raw_client([json!({
+        "ok": true,
+        "result": { "message_id": "seven" }
+    })]);
+
+    let error = client
+        .send_message_request(&SendMessage::new(-1001, "hi"))
+        .await
+        .expect_err("the result does not decode");
+
+    match &error {
+        Error::Ambiguous { method, detail, .. } => {
+            assert_eq!(method, "sendMessage");
+            assert!(detail.contains("could not be used"), "{detail}");
+        }
+        other => panic!("expected Ambiguous, got {other:?}"),
+    }
+    assert!(
+        !error.is_retryable(),
+        "the message may already be delivered"
+    );
+    assert_eq!(transport.calls(), 1, "a lost answer is not re-sent");
+
+    // The decoding failure survives as the cause, with the serde error below it.
+    let cause = StdError::source(&error).expect("cause kept");
+    let payload = cause
+        .downcast_ref::<Error>()
+        .expect("the precise Payload error is the cause");
+    assert!(matches!(payload, Error::Payload { .. }), "{payload:?}");
+    assert!(
+        StdError::source(payload).is_some(),
+        "the serde_json error stays at the bottom of the chain"
+    );
+}
+
+#[tokio::test]
+async fn a_send_whose_answer_has_no_result_is_ambiguous() {
+    let (client, transport, _sleeper) = raw_client([json!({ "ok": true })]);
+
+    let error = client
+        .send_message_request(&SendMessage::new(-1001, "hi"))
+        .await
+        .expect_err("no result to decode");
+
+    assert!(error.is_ambiguous(), "{error:?}");
+    assert_eq!(transport.calls(), 1);
+    let cause = StdError::source(&error).expect("cause kept");
+    let unexpected = cause
+        .downcast_ref::<Error>()
+        .expect("the Unexpected error is the cause");
+    assert!(
+        matches!(unexpected, Error::Unexpected { .. }),
+        "{unexpected:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_read_keeps_its_decoding_error_instead_of_becoming_ambiguous() {
+    // The other half of the boundary: a `get*` method changes nothing, so a
+    // decoding failure stays the precise error and the caller may repeat it.
+    let (client, transport, _sleeper) = raw_client([json!({
+        "ok": true,
+        "result": { "id": "not a number", "type": "supergroup" }
+    })]);
+    let error = client
+        .get_chat(&GetChat::new(-1001))
+        .await
+        .expect_err("the chat does not decode");
+    assert!(matches!(error, Error::Payload { .. }), "{error:?}");
+    assert!(!error.is_ambiguous(), "nothing changed on the server");
+    assert_eq!(transport.calls(), 1);
+
+    let (client, _transport, _sleeper) = raw_client([json!({ "ok": true })]);
+    let error = client
+        .get_chat(&GetChat::new(-1001))
+        .await
+        .expect_err("no result to decode");
+    assert!(matches!(error, Error::Unexpected { .. }), "{error:?}");
+    assert!(!error.is_ambiguous());
+}
+
+#[tokio::test]
+#[allow(deprecated)]
+async fn the_deprecated_raw_method_surfaces_a_classified_envelope() {
+    // `send_message` returns the envelope itself, so a body-level failure used
+    // to be reported as `Ok`; it is now classified like everything else.
+    let (client, transport, _sleeper) = raw_client([limited_body(4)]);
+
+    let error = client
+        .without_retry()
+        .send_message(-1001, "hi")
+        .await
+        .expect_err("ok: false is not a success");
+
+    assert!(
+        matches!(error, Error::RateLimited { code: 429, .. }),
+        "{error:?}"
+    );
+    assert_eq!(transport.calls(), 1);
 }
