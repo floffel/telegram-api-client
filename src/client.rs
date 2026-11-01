@@ -254,6 +254,42 @@ impl<T: Transport> TelegramClient<T> {
     }
 
     /// The effective retry budget.
+    ///
+    /// A fresh client is stricter than [`RetryPolicy::default`]: three attempts
+    /// in total — the first try plus two retries — waiting 500 ms before the
+    /// first repeat and 30 s at most for any later one. The accessor borrows the
+    /// budget, so it can be inspected without giving the client away.
+    ///
+    /// ```
+    /// use std::time::Duration;
+    /// use telegram_api_client::{Error, MockTransport, RetryPolicy, TelegramClient};
+    ///
+    /// let client = TelegramClient::new("123:ABC", MockTransport::new());
+    /// let policy = client.retry_policy();
+    /// assert_eq!(policy.max_attempts, 3);
+    /// assert_eq!(policy.base_delay, Duration::from_millis(500));
+    /// assert_eq!(policy.max_delay, Duration::from_secs(30));
+    ///
+    /// // The budget counts the first try, and the last attempt has no successor.
+    /// let failure = Error::Api { code: 503, description: "Service Unavailable".into() }
+    ///     .classify_for("getMe");
+    /// assert!(policy.should_retry(1, &failure));
+    /// assert!(policy.should_retry(2, &failure));
+    /// assert!(!policy.should_retry(3, &failure), "attempt 3 is the last one");
+    ///
+    /// // `without_retry` is the floor a budget can reach: one attempt, no retry.
+    /// let once = TelegramClient::new("123:ABC", MockTransport::new()).without_retry();
+    /// assert_eq!(once.retry_policy().max_attempts, 1);
+    /// assert!(!once.retry_policy().should_retry(1, &failure));
+    ///
+    /// // `RetryPolicy::new(0, ..)` clamps up to that same floor, never below it.
+    /// let clamped = once.with_retry_policy(RetryPolicy::new(
+    ///     0,
+    ///     Duration::from_millis(1),
+    ///     Duration::from_millis(2),
+    /// ));
+    /// assert_eq!(clamped.retry_policy().max_attempts, 1);
+    /// ```
     #[must_use]
     pub fn retry_policy(&self) -> &RetryPolicy {
         &self.retry.policy
@@ -277,6 +313,35 @@ impl<T: Transport> TelegramClient<T> {
     }
 
     /// The configured base URL.
+    ///
+    /// Returned exactly as it was given: the accessor does not normalise a
+    /// trailing slash, [`Self::method_url`] and [`Self::file_url`] drop it while
+    /// building an endpoint. The default is `https://api.telegram.org`.
+    ///
+    /// ```
+    /// use telegram_api_client::{File, MockTransport, TelegramClient};
+    ///
+    /// let client = TelegramClient::new("1:A", MockTransport::new());
+    /// assert_eq!(client.base_url(), "https://api.telegram.org");
+    ///
+    /// // Stored verbatim, trailing slash and all.
+    /// let proxy = client.with_base_url("https://proxy.test/");
+    /// assert_eq!(proxy.base_url(), "https://proxy.test/");
+    ///
+    /// // The boundary pair: with one trailing slash or with none, the endpoint
+    /// // built from it is the same one - no doubled separator, no missing one.
+    /// let bare = proxy.clone().with_base_url("https://proxy.test");
+    /// assert_eq!(bare.base_url(), "https://proxy.test");
+    /// assert_eq!(proxy.method_url("getMe"), bare.method_url("getMe"));
+    /// assert_eq!(proxy.method_url("getMe"), "https://proxy.test/bot1:A/getMe");
+    ///
+    /// // The download URL is built from the same base.
+    /// let file = File { file_path: Some("photos/a.jpg".into()), ..File::default() };
+    /// assert_eq!(
+    ///     proxy.file_url(&file).ok().as_deref(),
+    ///     Some("https://proxy.test/file/bot1:A/photos/a.jpg"),
+    /// );
+    /// ```
     #[must_use]
     pub fn base_url(&self) -> &str {
         &self.base_url
@@ -825,12 +890,17 @@ impl<T: Transport> TelegramClient<T> {
         /// Fetches one chat member.
         ///
         /// ```
-        /// use telegram_api_client::{GetChatMember, MockTransport, TelegramClient};
+        /// use telegram_api_client::{GetChatMember, MockReply, MockTransport, TelegramClient};
         ///
         /// # async fn demo() -> telegram_api_client::Result<()> {
-        /// let client = TelegramClient::new("123:ABC", MockTransport::new());
+        /// let transport = MockTransport::new();
+        /// transport.push(MockReply::result(serde_json::json!({
+        ///     "status": "member",
+        ///     "user": {"id": 42, "first_name": "Flo"},
+        /// })));
+        /// let client = TelegramClient::new("123:ABC", transport);
         /// let member = client.get_chat_member(&GetChatMember::new(-1001, 42)).await?;
-        /// assert!(!member.is_present());
+        /// assert!(member.is_present());
         /// # Ok(()) }
         /// ```
         get_chat_member, "getChatMember", GetChatMember, ChatMember

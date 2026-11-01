@@ -491,6 +491,56 @@ async fn chat_administration() {
     );
 }
 
+/// `status` and `user` are mandatory in a `getChatMember` result, so a truncated
+/// one is a typed decode failure that keeps the serde cause — never a member
+/// with a default identity (issue #26).
+#[tokio::test]
+async fn truncated_chat_member_reply_is_a_payload_error() {
+    use std::error::Error as StdError;
+
+    // The valid shape decodes; the two members below are the boundary.
+    let (client, _) = client_with(MockReply::result(json!({
+        "status": "administrator",
+        "user": {"id": 42, "first_name": "Flo"},
+    })));
+    let member = client
+        .get_chat_member(&GetChatMember::new(CHAT, 42))
+        .await
+        .unwrap();
+    assert_eq!(member.user.id, 42);
+
+    for truncated in [
+        json!({"user": {"id": 42, "first_name": "Flo"}}), // no status
+        json!({"status": "administrator"}),               // no user
+        json!({}),                                        // neither
+    ] {
+        let (client, _) = client_with(MockReply::result(truncated.clone()));
+        let error = client
+            .get_chat_member(&GetChatMember::new(CHAT, 42))
+            .await
+            .expect_err("a member without status and user must not decode");
+
+        match &error {
+            telegram_api_client::Error::Payload { message, source } => {
+                assert!(
+                    message.starts_with("getChatMember: could not decode result"),
+                    "message names the method: {message}"
+                );
+                assert!(
+                    source.is_some(),
+                    "the serde failure stays reachable for {truncated}"
+                );
+            }
+            other => panic!("expected Error::Payload for {truncated}, got {other:?}"),
+        }
+        assert!(
+            StdError::source(&error).is_some(),
+            "the cause is attached to the error itself"
+        );
+        assert!(!error.is_retryable(), "the payload will not improve");
+    }
+}
+
 #[tokio::test]
 async fn webhook_lifecycle() {
     let (client, transport) = ok_bool();

@@ -286,7 +286,9 @@ compiling and fails loudly instead of silently dropping the file.
 - **Permissive decoding.** Unknown JSON fields are ignored, unknown enum values
   are carried (`ParseMode::Unknown`, `ChatType::Unknown`, `ReplyMarkup::Unknown`,
   …) and re-serialized unchanged, missing optionals default, and both
-  `snake_case` and `camelCase` spellings are accepted.
+  `snake_case` and `camelCase` spellings are accepted. Mandatory members stay
+  mandatory: a payload without them (a `ChatMember` without `status` or `user`,
+  say) fails with `Error::Payload` rather than turning into a default value.
 - **Validation before the wire.** Text length is counted in UTF-16 code units
   like Telegram does (4096 for text, 1024 for captions), coordinates must lie in
   `-90..=90` / `-180..=180`, album sizes in `2..=10`, poll options in `2..=12`,
