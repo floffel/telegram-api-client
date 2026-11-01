@@ -4,7 +4,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::error::{Error, Result};
-use crate::send::{text_field, validate_chat, validate_text, MAX_CAPTION, MAX_MESSAGE_TEXT};
+use crate::send::{
+    text_field, validate_chat, validate_text, validate_thread, MAX_CAPTION, MAX_MESSAGE_TEXT,
+};
 use crate::transport::MultipartForm;
 use crate::types::{ChatId, InputMedia, LinkPreviewOptions, MessageEntity, ParseMode, ReplyMarkup};
 
@@ -534,6 +536,8 @@ pub struct ForwardMessage {
     /// Message to forward.
     pub message_id: i64,
     /// Forum topic to post into.
+    ///
+    /// The id of the topic's opening message; must be positive when set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message_thread_id: Option<i64>,
     /// Forward without a notification sound.
@@ -567,11 +571,30 @@ impl ForwardMessage {
         self
     }
 
-    /// Checks both chats and the message id.
+    /// Checks both chats, the message id and the forum-topic id.
     ///
     /// # Errors
     ///
-    /// [`Error::InvalidRequest`] for an unusable chat or a non-positive id.
+    /// [`Error::InvalidRequest`] for an unusable chat, a non-positive id, or a
+    /// `message_thread_id` that is set but not positive.
+    ///
+    /// ```
+    /// use telegram_api_client::{Error, ForwardMessage};
+    ///
+    /// // Forward outside a forum topic.
+    /// assert!(ForwardMessage::new(-1001, -1002, 7).validate().is_ok());
+    ///
+    /// // Forward into a topic: the topic's opening message id must be positive.
+    /// let mut forward = ForwardMessage::new(-1001, -1002, 7);
+    /// forward.message_thread_id = Some(1);
+    /// assert!(forward.validate().is_ok());
+    ///
+    /// forward.message_thread_id = Some(-1);
+    /// assert!(matches!(
+    ///     forward.validate(),
+    ///     Err(Error::InvalidRequest { field: "message_thread_id", .. })
+    /// ));
+    /// ```
     pub fn validate(&self) -> Result<()> {
         validate_chat("chat_id", &self.chat_id)?;
         validate_chat("from_chat_id", &self.from_chat_id)?;
@@ -581,7 +604,7 @@ impl ForwardMessage {
                 reason: format!("must be positive, got {}", self.message_id),
             });
         }
-        Ok(())
+        validate_thread("message_thread_id", self.message_thread_id)
     }
 }
 

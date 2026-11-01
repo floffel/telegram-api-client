@@ -126,6 +126,23 @@ pub(crate) fn validate_chat(field: &'static str, chat: &ChatId) -> Result<()> {
     }
 }
 
+/// Rejects a `message_thread_id` that names no message thread.
+///
+/// The value is in the same id space as `message_id` — it is the id of the
+/// topic's opening message — so `0` and negative ids address nothing Telegram
+/// can route a request to. Sending one comes back as a request error naming no
+/// field; refusing it here names `message_thread_id` instead. `None` means "not
+/// in a forum topic" and stays valid.
+pub(crate) fn validate_thread(field: &'static str, thread: Option<i64>) -> Result<()> {
+    match thread {
+        Some(id) if id <= 0 => Err(Error::InvalidRequest {
+            field,
+            reason: format!("must be positive when set, got {id}"),
+        }),
+        _ => Ok(()),
+    }
+}
+
 /// A file to upload: bytes, a name, and the MIME type Telegram should see.
 ///
 /// ```rust
@@ -550,6 +567,9 @@ pub struct DeliveryOptions {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reply_markup: Option<ReplyMarkup>,
     /// Forum topic to post into.
+    ///
+    /// The id of the topic's opening message. Omit it to post outside a topic;
+    /// a value that is set must be positive, which [`Self::validate`] checks.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message_thread_id: Option<i64>,
 }
@@ -581,6 +601,39 @@ impl DeliveryOptions {
     pub fn with_reply_markup(mut self, markup: ReplyMarkup) -> Self {
         self.reply_markup = Some(markup);
         self
+    }
+
+    /// Checks the delivery flags.
+    ///
+    /// `disable_notification`, `protect_content`, `allow_sending_without_reply`
+    /// and `reply_markup` have no value a pre-flight check could reject.
+    /// `message_thread_id` does: it is a message id, so zero and negative values
+    /// name no forum topic and are refused.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidRequest`] on `message_thread_id` when it is set to a
+    /// non-positive id.
+    ///
+    /// ```
+    /// use telegram_api_client::{DeliveryOptions, Error};
+    ///
+    /// // Not posting into a topic: nothing to check.
+    /// assert!(DeliveryOptions::default().validate().is_ok());
+    ///
+    /// // A topic's opening message id.
+    /// let mut options = DeliveryOptions::default();
+    /// options.message_thread_id = Some(7);
+    /// assert!(options.validate().is_ok());
+    ///
+    /// options.message_thread_id = Some(0);
+    /// assert!(matches!(
+    ///     options.validate(),
+    ///     Err(Error::InvalidRequest { field: "message_thread_id", .. })
+    /// ));
+    /// ```
+    pub fn validate(&self) -> Result<()> {
+        validate_thread("message_thread_id", self.message_thread_id)
     }
 }
 
@@ -652,6 +705,30 @@ impl MessageOptions {
         self.delivery = self.delivery.with_reply_markup(markup);
         self
     }
+
+    /// Checks the delivery flags carried alongside the text.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidRequest`] on `message_thread_id` when it is set to a
+    /// non-positive id.
+    ///
+    /// ```
+    /// use telegram_api_client::{Error, MessageOptions};
+    ///
+    /// let mut options = MessageOptions::default();
+    /// options.delivery.message_thread_id = Some(1);
+    /// assert!(options.validate().is_ok());
+    ///
+    /// options.delivery.message_thread_id = Some(-1);
+    /// assert!(matches!(
+    ///     options.validate(),
+    ///     Err(Error::InvalidRequest { field: "message_thread_id", .. })
+    /// ));
+    /// ```
+    pub fn validate(&self) -> Result<()> {
+        self.delivery.validate()
+    }
 }
 
 /// Optional flags for caption-bearing media.
@@ -721,13 +798,15 @@ impl MediaOptions {
         self
     }
 
-    /// Checks the caption length (and rejects an explicitly empty caption).
+    /// Checks the caption length (and rejects an explicitly empty caption), and
+    /// the delivery flags.
     ///
     /// # Errors
     ///
     /// [`Error::InvalidRequest`] when the caption is empty or longer than
-    /// [`MAX_CAPTION`].
+    /// [`MAX_CAPTION`], or when `message_thread_id` is set to a non-positive id.
     pub fn validate(&self) -> Result<()> {
+        self.delivery.validate()?;
         match self.caption.as_deref() {
             None => Ok(()),
             Some(caption) => validate_text("caption", caption, MAX_CAPTION),
@@ -812,15 +891,16 @@ impl SendMessage {
         self
     }
 
-    /// Checks chat and text.
+    /// Checks chat, text and delivery flags.
     ///
     /// # Errors
     ///
-    /// [`Error::InvalidRequest`] for an unusable chat, empty text, or text over
-    /// [`MAX_MESSAGE_TEXT`].
+    /// [`Error::InvalidRequest`] for an unusable chat, empty text, text over
+    /// [`MAX_MESSAGE_TEXT`], or a zero or negative `message_thread_id`.
     pub fn validate(&self) -> Result<()> {
         validate_chat("chat_id", &self.chat_id)?;
-        validate_text("text", &self.text, MAX_MESSAGE_TEXT)
+        validate_text("text", &self.text, MAX_MESSAGE_TEXT)?;
+        self.options.validate()
     }
 }
 
@@ -944,13 +1024,15 @@ macro_rules! media_send {
                 Some(form_with_file(body, stringify!($field), upload))
             }
 
-            /// Checks chat, media reference or upload, and caption.
+            /// Checks chat, media reference or upload, caption and delivery
+            /// flags.
             ///
             /// # Errors
             ///
             /// [`Error::InvalidRequest`] for an unusable chat, an empty media
             /// reference, an upload that is empty, too large, misnamed or of the
-            /// wrong MIME family, or a caption that is empty or too long.
+            /// wrong MIME family, a caption that is empty or too long, or a zero
+            /// or negative `message_thread_id`.
             pub fn validate(&self) -> Result<()> {
                 validate_chat("chat_id", &self.chat_id)?;
                 if self.$field.trim().is_empty() {
@@ -1127,13 +1209,13 @@ impl SendMediaGroup {
         self
     }
 
-    /// Checks chat, album size, uploads and per-item captions.
+    /// Checks chat, album size, uploads, per-item captions and delivery flags.
     ///
     /// # Errors
     ///
     /// [`Error::InvalidRequest`] for an unusable chat, an album outside
-    /// `2..=10` items, an upload that does not match its item kind, or a
-    /// caption that is empty or too long.
+    /// `2..=10` items, an upload that does not match its item kind, a caption
+    /// that is empty or too long, or a zero or negative `message_thread_id`.
     pub fn validate(&self) -> Result<()> {
         validate_chat("chat_id", &self.chat_id)?;
         if self.media.len() < MIN_MEDIA_GROUP || self.media.len() > MAX_MEDIA_GROUP {
@@ -1160,7 +1242,7 @@ impl SendMediaGroup {
                 validate_text("caption", caption, MAX_CAPTION)?;
             }
         }
-        Ok(())
+        self.delivery.validate()
     }
 
     /// The multipart body for this album, or `None` when every item is
@@ -1289,12 +1371,13 @@ impl SendLocation {
         self
     }
 
-    /// Checks chat and coordinates.
+    /// Checks chat, coordinates and delivery flags.
     ///
     /// # Errors
     ///
     /// [`Error::InvalidRequest`] for an unusable chat, out-of-range or `NaN`
-    /// coordinates, `heading` outside `1..=360`, or a zero `live_period`.
+    /// coordinates, `heading` outside `1..=360`, a zero `live_period`, or a zero
+    /// or negative `message_thread_id`.
     pub fn validate(&self) -> Result<()> {
         validate_chat("chat_id", &self.chat_id)?;
         if !(-90.0..=90.0).contains(&self.latitude) {
@@ -1324,7 +1407,7 @@ impl SendLocation {
                 reason: "must be greater than 0".to_string(),
             });
         }
-        Ok(())
+        self.delivery.validate()
     }
 }
 
@@ -1394,12 +1477,13 @@ impl SendVenue {
         self
     }
 
-    /// Checks chat, coordinates, title and address.
+    /// Checks chat, coordinates, title, address and delivery flags.
     ///
     /// # Errors
     ///
     /// [`Error::InvalidRequest`] for an unusable chat, out-of-range
-    /// coordinates, or an empty title/address.
+    /// coordinates, an empty title/address, or a zero or negative
+    /// `message_thread_id`.
     pub fn validate(&self) -> Result<()> {
         validate_chat("chat_id", &self.chat_id)?;
         if !(-90.0..=90.0).contains(&self.latitude) || !(-180.0..=180.0).contains(&self.longitude) {
@@ -1409,7 +1493,8 @@ impl SendVenue {
             });
         }
         validate_text("title", &self.title, MAX_CAPTION)?;
-        validate_text("address", &self.address, MAX_CAPTION)
+        validate_text("address", &self.address, MAX_CAPTION)?;
+        self.delivery.validate()
     }
 }
 
@@ -1465,16 +1550,17 @@ impl SendContact {
         self
     }
 
-    /// Checks chat, phone number and name.
+    /// Checks chat, phone number, name and delivery flags.
     ///
     /// # Errors
     ///
-    /// [`Error::InvalidRequest`] for an unusable chat, or an empty phone
-    /// number/first name.
+    /// [`Error::InvalidRequest`] for an unusable chat, an empty phone
+    /// number/first name, or a zero or negative `message_thread_id`.
     pub fn validate(&self) -> Result<()> {
         validate_chat("chat_id", &self.chat_id)?;
         validate_text("phone_number", &self.phone_number, 64)?;
-        validate_text("first_name", &self.first_name, 64)
+        validate_text("first_name", &self.first_name, 64)?;
+        self.delivery.validate()
     }
 }
 
@@ -1571,14 +1657,15 @@ impl SendPoll {
         self
     }
 
-    /// Checks chat, question, options and quiz consistency.
+    /// Checks chat, question, options, quiz consistency and delivery flags.
     ///
     /// # Errors
     ///
     /// [`Error::InvalidRequest`] for an unusable chat, an empty or over-long
     /// question, an option count outside `2..=12`, an empty or over-long
     /// option, a `correct_option_id` outside the option list, both
-    /// `open_period` and `close_date` set, or `open_period` outside `5..=600`.
+    /// `open_period` and `close_date` set, `open_period` outside `5..=600`, or a
+    /// zero or negative `message_thread_id`.
     pub fn validate(&self) -> Result<()> {
         validate_chat("chat_id", &self.chat_id)?;
         validate_text("question", &self.question, MAX_POLL_QUESTION)?;
@@ -1618,7 +1705,7 @@ impl SendPoll {
                 reason: "must be within 5..=600 seconds".to_string(),
             });
         }
-        Ok(())
+        self.delivery.validate()
     }
 }
 
@@ -1666,11 +1753,12 @@ impl SendDice {
         self
     }
 
-    /// Checks chat and emoji.
+    /// Checks chat, emoji and delivery flags.
     ///
     /// # Errors
     ///
-    /// [`Error::InvalidRequest`] for an unusable chat or an empty emoji.
+    /// [`Error::InvalidRequest`] for an unusable chat, an empty emoji, or a zero
+    /// or negative `message_thread_id`.
     pub fn validate(&self) -> Result<()> {
         validate_chat("chat_id", &self.chat_id)?;
         if let Some(emoji) = self.emoji.as_deref() {
@@ -1681,6 +1769,6 @@ impl SendDice {
                 });
             }
         }
-        Ok(())
+        self.delivery.validate()
     }
 }

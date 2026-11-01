@@ -35,6 +35,27 @@ means for this API is spelled out in the README under
   through `SourceChain`, so the newest failure is shown and the earlier one stays
   reachable. Classification is untouched: `is_retryable`, `is_ambiguous`,
   `retry_after` and `Display` are identical with and without a cause.
+- **A zero or negative `message_thread_id` is refused locally** (#27). The forum
+  topic id is in the same id space as `message_id` — it is the id of the topic's
+  opening message — so `0` and negative values name no thread Telegram can route
+  to, yet every request struct serialised them as given and spent a round trip on
+  a request the Bot API answers with an error naming no field. `validate()` now
+  refuses `Some(id)` when `id <= 0` on `Error::InvalidRequest { field:
+  "message_thread_id", .. }` — for `SendChatAction` and `ForwardMessage`
+  directly, and through the new `DeliveryOptions::validate` for every carrier of
+  the delivery flags: `MessageOptions`, `MediaOptions`, `SendMessage`, the six
+  media senders, `SendMediaGroup`, `SendLocation`, `SendVenue`, `SendContact`,
+  `SendPoll` and `SendDice`. `None` stays valid, and the check runs last, after
+  the rest of the request, so a caller fixing one field at a time is not bounced
+  between them. Stricter validation for input the Bot API rejects anyway, so
+  this is patch-level under the README's rules.
+- `tests/thread_id.rs` pins both sides of the boundary (`None`, `1` accepted;
+  `0`, `-1`, `i64::MIN` refused) for every one of those structs, plus the
+  extremes `i64::MAX`/`i64::MIN`, the refusal quoting the offending id, that a
+  local refusal spends no transport call, and two property tests: acceptance is
+  exactly `id > 0` for every `i64`, and the id survives the JSON round trip.
+  Doctests on `SendChatAction::validate`, `ForwardMessage::validate`,
+  `DeliveryOptions::validate` and `MessageOptions::validate`.
 - **A zero `parameters.retry_after` is no longer a hint** (#42). A 429 carrying
   `"retry_after": 0` became `RateLimited { retry_after: Some(0) }`, which shadowed
   a perfectly good textual hint ("Too Many Requests: retry after 6") and let
