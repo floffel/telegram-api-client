@@ -115,6 +115,30 @@ means for this API is spelled out in the README under
   wrapper itself, and the envelope cases run against a transport that returns the
   body verbatim: `ok: false`, a missing `result`, and a body-level 429, whose
   `retry_after` hint survives the trip through the gate.
+- **A `MenuButton` round trip no longer drops the members it does not model**
+  (#23). `default`, `commands` and `web_app` deserialized into variants that kept
+  only `type`, `text` and `web_app.url`, so every other member was gone after a
+  re-serialize: a button forwarded from a webhook lost whatever the newer Bot API
+  had added to it, and a `SetChatMenuButton` taken apart and put back together
+  silently rewrote the button. Each known variant now keeps the rest of the
+  object in `extra` (`MenuButton::extra` reads it, `with_extra` adds to it) and
+  merges it back on the way out; members of the nested `web_app` object are kept
+  next to `url`. A preserved member never displaces a modelled one — `type`,
+  `text` and `web_app.url` always win — so a crafted `extra` cannot turn a
+  `commands` button into something else on the wire. An unknown `type`, and a
+  payload that is not an object at all, is still carried verbatim as
+  `MenuButton::Unknown`. **Breaking** for code that names a variant as a value
+  or constructs one field by field: `Default` and `Commands` are struct variants
+  carrying `extra`, so `MenuButton::Commands` reads `MenuButton::commands()`
+  (the enum was already `#[non_exhaustive]`, so no exhaustive `match` can exist
+  outside the crate). The `Default` impl is unchanged and still yields the
+  `default` button.
+- `tests/edge_cases.rs` round-trips an unknown member on every known variant, at
+  the top level and inside `web_app`, and pins the precedence rule, non-object
+  inputs and the whole `SetChatMenuButton`; `tests/properties.rs` asserts the
+  same for arbitrary member names and values. `MenuButton`, `extra` and
+  `with_extra` carry doctests, and `docs/contracts.md` records the shape with
+  its source.
 
 ## [0.1.8] - 2026-10-28
 

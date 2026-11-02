@@ -1,7 +1,7 @@
 //! Callback answers, inline query answers and the chat menu button.
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 
 use crate::error::{Error, Result};
 use crate::send::validate_chat;
@@ -257,6 +257,11 @@ impl AnswerInlineQuery {
 
 /// The button in the chat's input field.
 ///
+/// Every known variant carries the members this crate does not model in
+/// `extra` and writes them back unchanged, so a button that gains a field in a
+/// later Bot API revision survives a round trip. A preserved member never
+/// displaces a modelled one: `type`, `text` and `web_app.url` always win.
+///
 /// ```
 /// use telegram_api_client::MenuButton;
 ///
@@ -272,87 +277,228 @@ impl AnswerInlineQuery {
 /// // Unknown button types survive a round trip.
 /// let raw: MenuButton = serde_json::from_str(r#"{"type":"future","x":1}"#).unwrap();
 /// assert_eq!(serde_json::to_value(&raw).unwrap()["type"], "future");
+///
+/// // So do unknown members on a known button type, top level and nested.
+/// let fresh: MenuButton =
+///     serde_json::from_str(r#"{"type":"web_app","text":"A","badge":7,"web_app":{"url":"u","color":"red"}}"#)
+///         .unwrap();
+/// let back = serde_json::to_value(&fresh).unwrap();
+/// assert_eq!(back["badge"], 7);
+/// assert_eq!(back["web_app"]["color"], "red");
 /// ```
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum MenuButton {
     /// Hide the button.
-    #[default]
-    Default,
+    Default {
+        /// Members this crate does not model, forwarded unchanged.
+        extra: Map<String, Value>,
+    },
     /// Show the bot's command list.
-    Commands,
+    Commands {
+        /// Members this crate does not model, forwarded unchanged.
+        extra: Map<String, Value>,
+    },
     /// Open a Mini App.
     WebApp {
         /// Button label.
         text: String,
         /// HTTPS URL of the Mini App.
         url: String,
+        /// Members this crate does not model, forwarded unchanged. Members of
+        /// a nested `web_app` object are kept under that key, next to `url`.
+        extra: Map<String, Value>,
     },
     /// A shape this crate does not model.
     Unknown(Value),
 }
 
+impl Default for MenuButton {
+    fn default() -> Self {
+        Self::default_menu()
+    }
+}
+
 impl MenuButton {
     /// Hide the menu button.
+    ///
+    /// ```
+    /// use telegram_api_client::MenuButton;
+    ///
+    /// assert_eq!(
+    ///     serde_json::to_value(MenuButton::default_menu()).unwrap(),
+    ///     serde_json::json!({ "type": "default" })
+    /// );
+    /// ```
     #[must_use]
     pub fn default_menu() -> Self {
-        Self::Default
+        Self::Default { extra: Map::new() }
     }
 
     /// Show the command list.
+    ///
+    /// ```
+    /// use telegram_api_client::MenuButton;
+    ///
+    /// assert_eq!(
+    ///     serde_json::to_value(MenuButton::commands()).unwrap(),
+    ///     serde_json::json!({ "type": "commands" })
+    /// );
+    /// ```
     #[must_use]
     pub fn commands() -> Self {
-        Self::Commands
+        Self::Commands { extra: Map::new() }
     }
 
     /// Open a Mini App.
+    ///
+    /// ```
+    /// use telegram_api_client::MenuButton;
+    ///
+    /// let button = MenuButton::web_app("Open", "https://example.com/app");
+    /// let json = serde_json::to_value(&button).unwrap();
+    /// assert_eq!(json["text"], "Open");
+    /// assert_eq!(json["web_app"]["url"], "https://example.com/app");
+    /// ```
     #[must_use]
     pub fn web_app(text: impl Into<String>, url: impl Into<String>) -> Self {
         Self::WebApp {
             text: text.into(),
             url: url.into(),
+            extra: Map::new(),
         }
+    }
+
+    /// The members a known variant does not model.
+    ///
+    /// `None` for [`MenuButton::Unknown`], whose whole payload is preserved.
+    ///
+    /// ```
+    /// use telegram_api_client::MenuButton;
+    ///
+    /// let button: MenuButton =
+    ///     serde_json::from_str(r#"{"type":"commands","badge":"new"}"#).unwrap();
+    /// let extra = button.extra().unwrap();
+    /// assert_eq!(extra["badge"], "new");
+    /// ```
+    #[must_use]
+    pub fn extra(&self) -> Option<&Map<String, Value>> {
+        match self {
+            Self::Default { extra } | Self::Commands { extra } | Self::WebApp { extra, .. } => {
+                Some(extra)
+            }
+            Self::Unknown(_) => None,
+        }
+    }
+
+    /// Adds a member this crate does not model.
+    ///
+    /// The member is written back unchanged; a known name is not displaced by
+    /// it. [`MenuButton::Unknown`] already carries its whole payload, so it
+    /// comes back untouched.
+    ///
+    /// ```
+    /// use telegram_api_client::MenuButton;
+    ///
+    /// let button = MenuButton::commands().with_extra("badge", serde_json::json!("new"));
+    /// let json = serde_json::to_value(&button).unwrap();
+    /// assert_eq!(json["type"], "commands");
+    /// assert_eq!(json["badge"], "new");
+    /// ```
+    #[must_use]
+    pub fn with_extra(mut self, key: impl Into<String>, value: Value) -> Self {
+        match &mut self {
+            Self::Default { extra } | Self::Commands { extra } | Self::WebApp { extra, .. } => {
+                extra.insert(key.into(), value);
+            }
+            Self::Unknown(_) => {}
+        }
+        self
+    }
+}
+
+/// Adds preserved members underneath the modelled ones, which keep their name.
+fn merge_extra(object: &mut Map<String, Value>, extra: &Map<String, Value>) {
+    for (key, value) in extra {
+        object.entry(key.clone()).or_insert_with(|| value.clone());
     }
 }
 
 impl Serialize for MenuButton {
     fn serialize<S: Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
+        let mut object = Map::new();
         match self {
-            Self::Default => json!({ "type": "default" }).serialize(serializer),
-            Self::Commands => json!({ "type": "commands" }).serialize(serializer),
-            Self::WebApp { text, url } => json!({
-                "type": "web_app",
-                "text": text,
-                "web_app": { "url": url },
-            })
-            .serialize(serializer),
-            Self::Unknown(value) => value.serialize(serializer),
+            Self::Default { extra } => {
+                object.insert("type".to_owned(), Value::from("default"));
+                merge_extra(&mut object, extra);
+            }
+            Self::Commands { extra } => {
+                object.insert("type".to_owned(), Value::from("commands"));
+                merge_extra(&mut object, extra);
+            }
+            Self::WebApp { text, url, extra } => {
+                object.insert("type".to_owned(), Value::from("web_app"));
+                object.insert("text".to_owned(), Value::String(text.clone()));
+                let mut web_app = Map::new();
+                web_app.insert("url".to_owned(), Value::String(url.clone()));
+                if let Some(preserved) = extra.get("web_app").and_then(Value::as_object) {
+                    merge_extra(&mut web_app, preserved);
+                }
+                object.insert("web_app".to_owned(), Value::Object(web_app));
+                merge_extra(&mut object, extra);
+            }
+            Self::Unknown(value) => return value.serialize(serializer),
         }
+        Value::Object(object).serialize(serializer)
     }
 }
 
 impl<'de> Deserialize<'de> for MenuButton {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
-        let value = Value::deserialize(deserializer)?;
-        Ok(match value.get("type").and_then(Value::as_str) {
-            Some("default") => Self::Default,
-            Some("commands") => Self::Commands,
-            Some("web_app") => {
-                let text = value
-                    .get("text")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_string();
-                let url = value
-                    .get("web_app")
-                    .and_then(|web_app| web_app.get("url"))
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_string();
-                Self::WebApp { text, url }
+        let mut object = match Value::deserialize(deserializer)? {
+            Value::Object(object) => object,
+            // Only an object carries a `type`; anything else is kept verbatim.
+            other => return Ok(Self::Unknown(other)),
+        };
+        let kind = object
+            .get("type")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        match kind.as_deref() {
+            Some("default") => {
+                object.remove("type");
+                Ok(Self::Default { extra: object })
             }
-            _ => Self::Unknown(value),
-        })
+            Some("commands") => {
+                object.remove("type");
+                Ok(Self::Commands { extra: object })
+            }
+            Some("web_app") => {
+                object.remove("type");
+                let text = object
+                    .remove("text")
+                    .and_then(|value| value.as_str().map(str::to_owned))
+                    .unwrap_or_default();
+                let mut web_app = match object.remove("web_app") {
+                    Some(Value::Object(web_app)) => web_app,
+                    _ => Map::new(),
+                };
+                let url = web_app
+                    .remove("url")
+                    .and_then(|value| value.as_str().map(str::to_owned))
+                    .unwrap_or_default();
+                // Members next to `url` are preserved under the same key.
+                if !web_app.is_empty() {
+                    object.insert("web_app".to_owned(), Value::Object(web_app));
+                }
+                Ok(Self::WebApp {
+                    text,
+                    url,
+                    extra: object,
+                })
+            }
+            _ => Ok(Self::Unknown(Value::Object(object))),
+        }
     }
 }
 
