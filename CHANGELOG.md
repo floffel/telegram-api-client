@@ -44,6 +44,23 @@ means for this API is spelled out in the README under
   the decoding error itself, since nothing changed and repeating the call is
   free. `Transport` implementations may therefore stay dumb: returning the body
   unjudged is now as safe as calling `Error::from_api_body` themselves.
+- **A media reference is validated against the upload that replaces it** (#35).
+  `EditMessageMedia`, `SendMediaGroup` and every `sendX` rejected an empty media
+  string unconditionally, although the encoder replaces it: an upload becomes a
+  part and the reference is rewritten to `attach://file0` (or dropped in favour
+  of the part for a `sendX` parameter). So a correct request — bytes attached
+  and an empty placeholder — failed locally, while `attach://file0` with no
+  upload passed and reached Telegram with no part behind it. Validation now
+  follows the wire: with an upload the reference is a placeholder and anything
+  (empty included) is accepted, because it is discarded; without one it must
+  name a `file_id` or URL, so an empty value and an `attach://` placeholder
+  (either case) are `Error::InvalidRequest` naming the field. The check lives
+  in one shared helper, which is why the album path and the single-media path
+  cannot drift apart again. Album items without an upload keep their own
+  reference rule; nothing else got stricter. The `reason` texts for those two
+  cases are new ("must not be empty without an upload", "is an
+  attach:// placeholder, but this request carries no upload to attach"), and the
+  `with_upload` docs now say what actually reaches the wire.
 - **A `getChatMember` result missing `status` or `user` is a decode error** (#26).
   Both members are mandatory in the Bot API, but `ChatMember` marked them
   `serde(default)`, so a truncated or malformed payload decoded into a member

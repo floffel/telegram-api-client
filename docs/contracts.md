@@ -78,6 +78,38 @@ not as a tagged union.
 | Source URL | <https://core.telegram.org/bots/api> |
 | Fetched | 2026-10-27 |
 
+## Media references and uploads
+
+Quote, "Sending files": *"There are three ways to send files (photos, stickers,
+audio, media, etc.):"*
+
+1. *"If the file is already stored somewhere on the Telegram servers, you don't
+   need to reupload it: each file object has a `file_id` field, simply pass this
+   `file_id` as a parameter instead of uploading. There are no limits for files
+   sent this way."*
+2. *"Provide Telegram with an HTTP URL for the file to be sent. Telegram will
+   download and send the file. 5 MB max size for photos and 20 MB max for other
+   types of content."*
+3. *"Post the file using multipart/form-data in the usual way that files are
+   uploaded via the browser. 10 MB max size for photos, 50 MB for other files."*
+
+The three are one field, not three fields, so the crate keeps them in one field
+too: `SendPhoto::photo`, `InputMedia::media` and the sibling fields carry a
+`file_id` or URL, and `with_upload` adds the bytes next to it. What goes on the
+wire is decided by the encoder, and validation has to agree with it:
+
+| Request | Reference on the wire | `validate()` |
+| --- | --- | --- |
+| upload, any reference (empty too) | rewritten to the part (`attach://file0`) or the part itself | accepted — the string is a placeholder |
+| no upload, `file_id` or URL | sent verbatim | accepted |
+| no upload, empty | sent verbatim, resolves to nothing | `Error::InvalidRequest`, "must not be empty without an upload" |
+| no upload, `attach://…` | sent verbatim, no part to satisfy it | `Error::InvalidRequest`, "is an attach:// placeholder" |
+
+| Item | Value |
+| --- | --- |
+| Source URL | <https://core.telegram.org/bots/api#sending-files> |
+| Fetched | 2026-11-02 |
+
 ## Known gaps (tracked, not hidden)
 
 - `Message` still models the subset the crate can act on (id, chat, sender,

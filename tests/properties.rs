@@ -7,7 +7,7 @@ use std::time::Duration;
 use telegram_api_client::{
     guess_mime, is_idempotent, is_valid_mime, send::MAX_POLL_OPTION, ChatId, EntityKind, Error,
     InputMedia, InputMediaKind, MessageEntity, MultipartFile, MultipartForm, ParseMode, PollType,
-    RetryPolicy, SendMessage, SendPoll, Update, UpdateCursor,
+    RetryPolicy, SendMessage, SendPhoto, SendPoll, Update, UpdateCursor, UploadFile,
 };
 
 proptest! {
@@ -548,5 +548,42 @@ proptest! {
                 cursor.next_offset()
             );
         }
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig { cases: 96, ..ProptestConfig::default() })]
+
+    /// A media reference is only validated when nothing replaces it (#35): with
+    /// an upload any string passes, because the encoder rewrites the field;
+    /// without one the string is what Telegram resolves, so it must be neither
+    /// blank nor an `attach://` placeholder no part could satisfy.
+    #[test]
+    fn a_media_reference_is_valid_iff_nothing_replaces_it(reference in ".{0,24}") {
+        // The contract restated independently of the library's own predicate.
+        let trimmed = reference.trim();
+        let is_placeholder = trimmed
+            .get(..9)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("attach://"));
+        let json_only_is_valid = !trimmed.is_empty() && !is_placeholder;
+
+        prop_assert_eq!(
+            SendPhoto::new(-1001_i64, reference.clone()).validate().is_ok(),
+            json_only_is_valid,
+            "no upload, reference {:?}",
+            reference
+        );
+
+        let uploaded = SendPhoto {
+            chat_id: ChatId::Id(-1001),
+            photo: reference.clone(),
+            upload: Some(UploadFile::new("a.png", vec![1])),
+            ..SendPhoto::default()
+        };
+        prop_assert!(
+            uploaded.validate().is_ok(),
+            "an upload replaces {:?}, so it cannot be rejected",
+            reference
+        );
     }
 }

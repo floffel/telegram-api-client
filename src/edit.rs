@@ -5,7 +5,8 @@ use serde_json::Value;
 
 use crate::error::{Error, Result};
 use crate::send::{
-    text_field, validate_chat, validate_text, validate_thread, MAX_CAPTION, MAX_MESSAGE_TEXT,
+    text_field, validate_chat, validate_media_reference, validate_text, validate_thread,
+    MAX_CAPTION, MAX_MESSAGE_TEXT,
 };
 use crate::transport::MultipartForm;
 use crate::types::{ChatId, InputMedia, LinkPreviewOptions, MessageEntity, ParseMode, ReplyMarkup};
@@ -345,19 +346,44 @@ impl EditMessageMedia {
 
     /// Checks the target, the media reference or upload, and the caption.
     ///
+    /// The reference and the bytes are two halves of one field. An upload is
+    /// sent as the `file0` part and `media` is rewritten to `attach://file0`,
+    /// so the placeholder in `media` is discarded and an empty one is correct.
+    /// Without an upload `media` is sent verbatim: it must name a `file_id` or
+    /// URL, never an `attach://` placeholder that no part would satisfy.
+    ///
     /// # Errors
     ///
     /// [`Error::InvalidRequest`] for an invalid target, an empty media
-    /// reference, an upload that is empty, too large, misnamed or of the wrong
-    /// MIME family for the item kind, or a caption that is empty or too long.
+    /// reference or an `attach://` placeholder without an upload, an upload
+    /// that is empty, too large, misnamed or of the wrong MIME family for the
+    /// item kind, or a caption that is empty or too long.
+    ///
+    /// ```rust
+    /// use telegram_api_client::{EditMessageMedia, InputMedia, UploadFile};
+    ///
+    /// // Uploaded: the empty placeholder is replaced by `attach://file0`.
+    /// let uploaded = EditMessageMedia::new(
+    ///     1,
+    ///     7,
+    ///     InputMedia::photo("").with_upload(UploadFile::new("a.png", vec![1])),
+    /// );
+    /// assert!(uploaded.validate().is_ok());
+    ///
+    /// // Not uploaded: `media` is what Telegram resolves, so it must be real.
+    /// assert!(EditMessageMedia::new(1, 7, InputMedia::photo("AgACAgI"))
+    ///     .validate()
+    ///     .is_ok());
+    /// assert!(EditMessageMedia::new(1, 7, InputMedia::photo(""))
+    ///     .validate()
+    ///     .is_err());
+    /// assert!(EditMessageMedia::new(1, 7, InputMedia::photo("attach://file0"))
+    ///     .validate()
+    ///     .is_err());
+    /// ```
     pub fn validate(&self) -> Result<()> {
         self.target.validate()?;
-        if self.media.media.trim().is_empty() {
-            return Err(Error::InvalidRequest {
-                field: "media",
-                reason: "media reference must not be empty".to_string(),
-            });
-        }
+        validate_media_reference("media", &self.media.media, self.media.upload.is_some())?;
         if let Some(upload) = &self.media.upload {
             upload.validate_with_limit(
                 "media",

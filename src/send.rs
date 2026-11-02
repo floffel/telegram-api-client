@@ -126,6 +126,54 @@ pub(crate) fn validate_chat(field: &'static str, chat: &ChatId) -> Result<()> {
     }
 }
 
+/// The prefix that makes a media field point at a multipart part.
+const ATTACH_PREFIX: &str = "attach://";
+
+/// Fails when a media reference cannot reach Telegram as written.
+///
+/// `has_upload` says whether the same request also carries the bytes, and that
+/// decides which half of the field is real:
+///
+/// - With an upload the string is a placeholder. The encoder names the part and
+///   rewrites the field (`attach://file0` in an album item or an edit, the part
+///   itself for a `sendX` parameter), so whatever the caller left there is
+///   discarded — an empty string is as good as `attach://anything`.
+/// - Without an upload the string is the whole truth: Telegram receives it
+///   verbatim and resolves it as a `file_id` or URL, so an empty value, or an
+///   `attach://` placeholder that no part would satisfy, is refused before the
+///   call instead of on the server.
+///
+/// The prefix is compared case-insensitively: `ATTACH://x` is not a `file_id`
+/// either, so it fails the same way — with a message that names the reason.
+pub(crate) fn validate_media_reference(
+    field: &'static str,
+    media: &str,
+    has_upload: bool,
+) -> Result<()> {
+    if has_upload {
+        return Ok(());
+    }
+    let reference = media.trim();
+    if reference.is_empty() {
+        return Err(Error::InvalidRequest {
+            field,
+            reason: "must not be empty without an upload".to_string(),
+        });
+    }
+    if reference
+        .get(..ATTACH_PREFIX.len())
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case(ATTACH_PREFIX))
+    {
+        return Err(Error::InvalidRequest {
+            field,
+            reason: format!(
+                "`{reference}` is an attach:// placeholder, but this request carries no upload to attach"
+            ),
+        });
+    }
+    Ok(())
+}
+
 /// Rejects a `message_thread_id` that names no message thread.
 ///
 /// The value is in the same id space as `message_id` — it is the id of the
@@ -913,7 +961,8 @@ macro_rules! media_send {
         }
         $doc:literal
         accepts: $families:expr,
-        limit: $limit:expr
+        limit: $limit:expr,
+        mime: $mime:literal
     ) => {
         $(#[$meta])*
         #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq)]
@@ -983,8 +1032,9 @@ macro_rules! media_send {
             /// Uploads local bytes instead of referencing a `file_id` or URL.
             ///
             /// The file becomes a multipart part named after the Bot API
-            /// parameter, and the reference field is rewritten to the matching
-            /// `attach://` placeholder.
+            /// parameter and the reference field leaves the body: nothing of
+            /// the `attach://` value this writes is sent, because an empty
+            /// placeholder would be just as valid (see `validate`).
             #[doc = concat!(
                 "```\n",
                 "use telegram_api_client::{", stringify!($name), ", UploadFile};\n",
@@ -1024,23 +1074,41 @@ macro_rules! media_send {
                 Some(form_with_file(body, stringify!($field), upload))
             }
 
-            /// Checks chat, media reference or upload, caption and delivery
+            /// Checks chat, the media reference or upload, caption and delivery
             /// flags.
+            ///
+            /// The reference and the bytes are two halves of one field: an
+            /// upload becomes a multipart part and the reference is rewritten
+            /// to point at it, so an empty placeholder is correct when bytes
+            /// are attached — whatever is in the reference is discarded.
+            /// Without an upload the reference is what Telegram resolves, so an
+            /// `attach://` placeholder would reach it with no part behind it.
             ///
             /// # Errors
             ///
             /// [`Error::InvalidRequest`] for an unusable chat, an empty media
-            /// reference, an upload that is empty, too large, misnamed or of the
-            /// wrong MIME family, a caption that is empty or too long, or a zero
-            /// or negative `message_thread_id`.
+            /// reference or an `attach://` placeholder without an upload, an
+            /// upload that is empty, too large, misnamed or of the wrong MIME
+            /// family, a caption that is empty or too long, or a zero or
+            /// negative `message_thread_id`.
+            #[doc = concat!(
+                "```rust\n",
+                "use telegram_api_client::{", stringify!($name), ", UploadFile};\n",
+                "\n",
+                "// Bytes attached: the empty placeholder is never sent.\n",
+                "let uploaded = ", stringify!($name), "::new(1, \"\")\n",
+                "    .with_upload(UploadFile::new(\"a.bin\", vec![1, 2, 3]).with_mime(\"", $mime, "\"));\n",
+                "assert!(uploaded.validate().is_ok());\n",
+                "\n",
+                "// No bytes attached: the reference itself must be a file_id or URL.\n",
+                "assert!(", stringify!($name), "::new(1, \"AgACAgIAAxkBAAI\").validate().is_ok());\n",
+                "assert!(", stringify!($name), "::new(1, \"\").validate().is_err());\n",
+                "assert!(", stringify!($name), "::new(1, \"attach://file0\").validate().is_err());\n",
+                "```\n",
+            )]
             pub fn validate(&self) -> Result<()> {
                 validate_chat("chat_id", &self.chat_id)?;
-                if self.$field.trim().is_empty() {
-                    return Err(Error::InvalidRequest {
-                        field: stringify!($field),
-                        reason: "must not be empty".to_string(),
-                    });
-                }
+                validate_media_reference(stringify!($field), &self.$field, self.upload.is_some())?;
                 if let Some(upload) = &self.upload {
                     upload.validate_with_limit(stringify!($field), $families, $limit)?;
                 }
@@ -1067,7 +1135,8 @@ media_send! {
     }
     "A photo, referenced by `file_id` or URL."
     accepts: &["image/"],
-    limit: MAX_PHOTO_BYTES
+    limit: MAX_PHOTO_BYTES,
+    mime: "image/png"
 }
 
 media_send! {
@@ -1085,7 +1154,8 @@ media_send! {
     }
     "A document, referenced by `file_id` or URL."
     accepts: &[],
-    limit: MAX_UPLOAD_BYTES
+    limit: MAX_UPLOAD_BYTES,
+    mime: "application/pdf"
 }
 
 media_send! {
@@ -1103,7 +1173,8 @@ media_send! {
     }
     "An audio track, referenced by `file_id` or URL."
     accepts: &["audio/"],
-    limit: MAX_UPLOAD_BYTES
+    limit: MAX_UPLOAD_BYTES,
+    mime: "audio/mpeg"
 }
 
 media_send! {
@@ -1121,7 +1192,8 @@ media_send! {
     }
     "A video, referenced by `file_id` or URL."
     accepts: &["video/"],
-    limit: MAX_UPLOAD_BYTES
+    limit: MAX_UPLOAD_BYTES,
+    mime: "video/mp4"
 }
 
 media_send! {
@@ -1139,7 +1211,8 @@ media_send! {
     }
     "An animation (GIF or soundless MP4), referenced by `file_id` or URL."
     accepts: &["image/", "video/"],
-    limit: MAX_UPLOAD_BYTES
+    limit: MAX_UPLOAD_BYTES,
+    mime: "image/gif"
 }
 
 media_send! {
@@ -1157,7 +1230,8 @@ media_send! {
     }
     "A voice note, referenced by `file_id` or URL."
     accepts: &["audio/"],
-    limit: MAX_UPLOAD_BYTES
+    limit: MAX_UPLOAD_BYTES,
+    mime: "audio/ogg"
 }
 
 /// `sendMediaGroup` body — an album of 2 to 10 items.
@@ -1209,13 +1283,55 @@ impl SendMediaGroup {
         self
     }
 
-    /// Checks chat, album size, uploads, per-item captions and delivery flags.
+    /// Checks chat, album size, per-item references or uploads, captions and
+    /// delivery flags.
+    ///
+    /// An item's reference is only read when the item carries no upload: the
+    /// encoder attaches uploaded items as `file0`, `file1`, … and rewrites
+    /// their `media` field, so an empty placeholder is correct next to bytes.
+    /// An item without bytes keeps its reference verbatim, so an `attach://`
+    /// placeholder there would reach Telegram with no part behind it.
     ///
     /// # Errors
     ///
     /// [`Error::InvalidRequest`] for an unusable chat, an album outside
-    /// `2..=10` items, an upload that does not match its item kind, a caption
-    /// that is empty or too long, or a zero or negative `message_thread_id`.
+    /// `2..=10` items, an item reference that is empty or an `attach://`
+    /// placeholder without an upload, an upload that does not match its item
+    /// kind, a caption that is empty or too long, or a zero or negative
+    /// `message_thread_id`.
+    ///
+    /// ```rust
+    /// use telegram_api_client::{InputMedia, SendMediaGroup, UploadFile};
+    ///
+    /// // The uploaded item's placeholder is rewritten, the other one is sent.
+    /// let album = SendMediaGroup::new(
+    ///     -1001,
+    ///     vec![
+    ///         InputMedia::photo("AgACAgI"),
+    ///         InputMedia::photo("")
+    ///             .with_upload(UploadFile::new("b.png", vec![1, 2]).with_mime("image/png")),
+    ///     ],
+    /// );
+    /// assert!(album.validate().is_ok());
+    ///
+    /// // The first item has no bytes to attach: its empty reference is an error.
+    /// let half = SendMediaGroup::new(
+    ///     -1001,
+    ///     vec![
+    ///         InputMedia::photo(""),
+    ///         InputMedia::photo("")
+    ///             .with_upload(UploadFile::new("b.png", vec![1, 2]).with_mime("image/png")),
+    ///     ],
+    /// );
+    /// assert!(half.validate().is_err());
+    ///
+    /// // Without an upload nothing rewrites `media`, so a placeholder is a bug.
+    /// let placeholder = SendMediaGroup::new(
+    ///     -1001,
+    ///     vec![InputMedia::photo("attach://file0"), InputMedia::photo("AgACAgI")],
+    /// );
+    /// assert!(placeholder.validate().is_err());
+    /// ```
     pub fn validate(&self) -> Result<()> {
         validate_chat("chat_id", &self.chat_id)?;
         if self.media.len() < MIN_MEDIA_GROUP || self.media.len() > MAX_MEDIA_GROUP {
@@ -1228,12 +1344,7 @@ impl SendMediaGroup {
             });
         }
         for item in &self.media {
-            if item.media.trim().is_empty() {
-                return Err(Error::InvalidRequest {
-                    field: "media",
-                    reason: "item media reference must not be empty".to_string(),
-                });
-            }
+            validate_media_reference("media", &item.media, item.upload.is_some())?;
             if let Some(upload) = &item.upload {
                 let families = item.kind.mime_families();
                 upload.validate_with_limit("media", families, item.kind.upload_limit_bytes())?;
