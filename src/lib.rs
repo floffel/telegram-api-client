@@ -47,8 +47,8 @@ pub use callback::{
     MenuButton, SetChatMenuButton,
 };
 pub use chat::{
-    BanChatMember, ChatMember, GetChat, GetChatMember, PinChatMessage, SendChatAction,
-    UnpinChatMessage,
+    BanChatMember, ChatMember, ChatMemberPresence, GetChat, GetChatMember, PinChatMessage,
+    SendChatAction, UnpinChatMessage,
 };
 pub use client::TelegramClient;
 pub use edit::{

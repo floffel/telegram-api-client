@@ -336,6 +336,38 @@ impl UnpinChatMessage {
     }
 }
 
+/// Where a [`ChatMember`] stands with respect to its chat.
+///
+/// `getChatMember` does not answer with a plain yes/no. A `restricted` member
+/// carries an `is_member` flag that can be `false` for a user who is currently
+/// outside the chat, and a status a newer Bot API introduced says nothing about
+/// presence at all. Keeping "not there" and "not said" apart is what keeps a
+/// presence check from turning into a false positive.
+///
+/// ```
+/// use telegram_api_client::{ChatMember, ChatMemberPresence, ChatMemberStatus};
+///
+/// let mut member = ChatMember::default();
+/// member.status = ChatMemberStatus::Restricted;
+/// member.is_member = Some(false);
+/// assert_eq!(member.presence(), ChatMemberPresence::Absent);
+///
+/// member.status = ChatMemberStatus::from("ghost");
+/// assert_eq!(member.presence(), ChatMemberPresence::Unknown);
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum ChatMemberPresence {
+    /// The user is in the chat.
+    Present,
+    /// The user is not in the chat: they left, were banned, or are restricted
+    /// without membership.
+    Absent,
+    /// The payload does not answer the question, because its status is one this
+    /// crate does not know yet. Neither present nor absent.
+    Unknown,
+}
+
 /// One member of a chat, as returned by `getChatMember`.
 ///
 /// `status` and `user` are mandatory in the Bot API, and they are mandatory
@@ -352,6 +384,12 @@ impl UnpinChatMessage {
 /// ).unwrap();
 /// assert_eq!(member.status, ChatMemberStatus::Creator);
 /// assert_eq!(member.user.id, 42);
+///
+/// // A restricted member says whether they are still in the chat.
+/// let restricted: ChatMember = serde_json::from_str(
+///     r#"{"status":"restricted","user":{"id":42},"is_member":false}"#,
+/// ).unwrap();
+/// assert_eq!(restricted.is_member, Some(false));
 ///
 /// // Unknown status values are carried, not rejected.
 /// let fresh: ChatMember = serde_json::from_str(
@@ -373,24 +411,106 @@ pub struct ChatMember {
     /// Whether the member hides behind the chat identity.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub is_anonymous: Option<bool>,
+    /// Whether a *restricted* member is still in the chat.
+    ///
+    /// Telegram sends this flag, and only this flag, inside
+    /// `ChatMemberRestricted`, where it is required. It stays `None` for every
+    /// other status and for a payload that left it out. Only
+    /// [`ChatMemberStatus::Restricted`] consults it: a `creator` carrying
+    /// `is_member: false` is still the owner, so a crafted flag cannot make a
+    /// present member disappear.
+    ///
+    /// ```
+    /// use telegram_api_client::ChatMember;
+    ///
+    /// let member: ChatMember = serde_json::from_str(
+    ///     r#"{"status":"restricted","user":{"id":42},"isMember":true}"#,
+    /// ).unwrap();
+    /// assert_eq!(member.is_member, Some(true));
+    ///
+    /// // Every other status has no such flag, so it stays unset.
+    /// let creator: ChatMember =
+    ///     serde_json::from_str(r#"{"status":"creator","user":{"id":42}}"#).unwrap();
+    /// assert_eq!(creator.is_member, None);
+    /// ```
+    #[serde(default, alias = "isMember", skip_serializing_if = "Option::is_none")]
+    pub is_member: Option<bool>,
 }
 
 impl ChatMember {
-    /// Whether the user is currently in the chat (any non-`left`/`kicked` state).
+    /// Where this member stands: present, absent, or not answered by the
+    /// payload.
+    ///
+    /// `restricted` is the one status whose answer depends on
+    /// [`is_member`](Self::is_member): the flag on `false` means the user is
+    /// outside the chat, while a flag that is absent is not read as an absence.
+    /// `left` and `kicked` are absent; `creator`, `administrator` and `member`
+    /// are present. Any other status is [`ChatMemberPresence::Unknown`] — a new
+    /// value from a newer Bot API is not the same thing as "not in the chat".
     ///
     /// ```
-    /// use telegram_api_client::{ChatMember, ChatMemberStatus};
+    /// use telegram_api_client::{ChatMember, ChatMemberPresence, ChatMemberStatus};
+    ///
+    /// let mut member = ChatMember::default();
+    /// member.status = ChatMemberStatus::Member;
+    /// assert_eq!(member.presence(), ChatMemberPresence::Present);
+    ///
+    /// // A restricted user who is not in the chat is absent, not present.
+    /// member.status = ChatMemberStatus::Restricted;
+    /// member.is_member = Some(false);
+    /// assert_eq!(member.presence(), ChatMemberPresence::Absent);
+    ///
+    /// // A restricted user without the flag is not turned absent on a guess.
+    /// member.is_member = None;
+    /// assert_eq!(member.presence(), ChatMemberPresence::Present);
+    ///
+    /// // A status from a newer Bot API answers neither way.
+    /// member.status = ChatMemberStatus::from("ghost");
+    /// assert_eq!(member.presence(), ChatMemberPresence::Unknown);
+    /// ```
+    #[must_use]
+    pub fn presence(&self) -> ChatMemberPresence {
+        match self.status {
+            ChatMemberStatus::Creator
+            | ChatMemberStatus::Administrator
+            | ChatMemberStatus::Member => ChatMemberPresence::Present,
+            ChatMemberStatus::Restricted => {
+                if self.is_member == Some(false) {
+                    ChatMemberPresence::Absent
+                } else {
+                    ChatMemberPresence::Present
+                }
+            }
+            ChatMemberStatus::Left | ChatMemberStatus::Kicked => ChatMemberPresence::Absent,
+            // `Unknown(..)`, plus any status a later Bot API adds: the payload
+            // does not say whether the user is in the chat.
+            _ => ChatMemberPresence::Unknown,
+        }
+    }
+
+    /// Whether the user is currently in the chat.
+    ///
+    /// `true` exactly when [`presence`](Self::presence) is
+    /// [`ChatMemberPresence::Present`], so a restricted non-member is not
+    /// present and neither is a status this crate does not know yet.
+    ///
+    /// ```
+    /// use telegram_api_client::{ChatMember, ChatMemberPresence, ChatMemberStatus};
     ///
     /// let mut member = ChatMember::default();
     /// assert!(!member.is_present());
+    ///
     /// member.status = ChatMemberStatus::Member;
     /// assert!(member.is_present());
+    ///
+    /// // A restricted user who is not a member of the chat.
+    /// member.status = ChatMemberStatus::Restricted;
+    /// member.is_member = Some(false);
+    /// assert!(!member.is_present());
+    /// assert_eq!(member.presence(), ChatMemberPresence::Absent);
     /// ```
     #[must_use]
     pub fn is_present(&self) -> bool {
-        !matches!(
-            self.status,
-            ChatMemberStatus::Left | ChatMemberStatus::Kicked | ChatMemberStatus::Unknown(_)
-        )
+        self.presence() == ChatMemberPresence::Present
     }
 }

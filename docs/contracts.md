@@ -78,6 +78,28 @@ not as a tagged union.
 | Source URL | <https://core.telegram.org/bots/api> |
 | Fetched | 2026-10-27 |
 
+## `ChatMemberRestricted.is_member`
+
+Quote, "ChatMemberRestricted": *"Represents a chat member that is under certain
+restrictions in the chat. Supergroups only."* Its `is_member` row reads
+*"True, if the user is a member of the chat at the moment of the request"* — so
+the status alone does not say whether a restricted user is in the chat.
+`ChatMember::presence()` reads the flag for that one status:
+
+| Status and flag | `ChatMemberPresence` |
+| --- | --- |
+| `creator`, `administrator`, `member` | `Present` |
+| `restricted`, `is_member: true` | `Present` |
+| `restricted`, `is_member: false` | `Absent` |
+| `restricted`, no flag sent | `Present` — a missing flag is not an absence |
+| `left`, `kicked` | `Absent` — whatever `is_member` says |
+| any other status | `Unknown` — neither present nor absent |
+
+| Item | Value |
+| --- | --- |
+| Source URL | <https://core.telegram.org/bots/api#chatmemberrestricted> |
+| Fetched | 2026-11-02 |
+
 ## Known gaps (tracked, not hidden)
 
 - `Message` still models the subset the crate can act on (id, chat, sender,

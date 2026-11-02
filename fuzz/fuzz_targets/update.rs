@@ -39,6 +39,13 @@ fuzz_target!(|data: &[u8]| {
         let _ = from.display_name();
     }
 
+    // Presence is total too: whatever status string arrived, it answers
+    // present, absent or unknown (issue #24).
+    if let Some(changed) = update.chat_member_update() {
+        let _ = changed.old_chat_member.presence();
+        let _ = changed.new_chat_member.presence();
+    }
+
     // Round trip through the crate's own serialisation.
     let rendered = serde_json::to_vec(&update).expect("Update serialises");
     let reparsed: Update = serde_json::from_slice(&rendered).expect("own output parses back");
