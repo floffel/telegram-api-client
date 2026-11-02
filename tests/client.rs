@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use serde_json::{json, Value};
-use telegram_api_client::{Error, Result, TelegramClient, Transport};
+use telegram_api_client::{Error, NoDelay, Result, TelegramClient, Transport};
 
 #[derive(Clone)]
 struct Recorder {
@@ -124,7 +124,10 @@ async fn legacy_wrappers_surface_a_rate_limited_envelope() {
         "description": "Too Many Requests: retry after 7",
         "parameters": { "retry_after": 7 }
     }));
-    let client = TelegramClient::new("123:ABC", rec.clone());
+    // `NoDelay`: the retry budget is what this test pins, not the clock. A 429 is
+    // the one body-level failure the loop may repeat (nothing was processed), so
+    // the wrapper's answer arrives only after that budget is spent.
+    let client = TelegramClient::new("123:ABC", rec.clone()).with_sleeper(NoDelay);
 
     let me = client.get_me().await.unwrap_err();
     assert!(matches!(me, Error::RateLimited { .. }), "{me:?}");
@@ -136,8 +139,9 @@ async fn legacy_wrappers_surface_a_rate_limited_envelope() {
 
     assert_eq!(
         rec.calls.lock().unwrap().len(),
-        2,
-        "a body-level 429 is reported, never retried on the wrapper's behalf"
+        6,
+        "the loop's three attempts per call, and then the 429 is reported — \
+         the wrapper adds no success and no retry of its own"
     );
 }
 
@@ -154,11 +158,8 @@ async fn legacy_wrappers_reject_an_envelope_without_result() {
     assert!(matches!(me, Error::Unexpected { .. }), "{me:?}");
     assert!(me.to_string().contains("result"), "{me}");
 
-    // A send may report the same answer as `Ambiguous` (the bot replied, so the
-    // message may well exist) — either way it is not handed back as a success.
+    // A send is not retried on a lost answer, so the decoding failure is
+    // `Ambiguous`: the bot replied, the message may well exist (#29).
     let sent = client.send_message(-1001, "Hallo").await.unwrap_err();
-    assert!(
-        matches!(sent, Error::Unexpected { .. } | Error::Ambiguous { .. }),
-        "{sent:?}"
-    );
+    assert!(matches!(sent, Error::Ambiguous { .. }), "{sent:?}");
 }
