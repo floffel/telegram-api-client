@@ -1,9 +1,10 @@
 //! Client payloads against a recording transport.
 
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use serde_json::{json, Value};
-use telegram_api_client::{Result, TelegramClient, Transport};
+use telegram_api_client::{Error, Result, TelegramClient, Transport};
 
 #[derive(Clone)]
 struct Recorder {
@@ -68,4 +69,96 @@ fn debug_does_not_leak_the_token() {
     let client = TelegramClient::new("123:SECRET", recorder(json!({})));
     let rendered = format!("{client:?}");
     assert!(!rendered.contains("SECRET"), "token im Debug: {rendered}");
+}
+
+/// Regression for #31: the deprecated wrappers used to hand back a failed body
+/// as a success, because only the typed methods ran the envelope check. The
+/// `Recorder` returns exactly the case the bug describes — the transport yields
+/// the envelope as `Ok` — so the decision has to happen on the client side.
+#[tokio::test]
+#[allow(deprecated)]
+async fn legacy_send_message_surfaces_a_failed_envelope() {
+    let rec = recorder(json!({
+        "ok": false,
+        "error_code": 400,
+        "description": "Bad Request: chat not found"
+    }));
+    let client = TelegramClient::new("123:ABC", rec.clone());
+
+    let error = client.send_message(-1001, "Hallo").await.unwrap_err();
+
+    assert!(matches!(error, Error::Api { code: 400, .. }), "{error:?}");
+    assert!(error.to_string().contains("chat not found"), "{error}");
+    assert_eq!(
+        rec.calls.lock().unwrap().len(),
+        1,
+        "a terminal Bot API error is not retried"
+    );
+}
+
+#[tokio::test]
+#[allow(deprecated)]
+async fn legacy_get_me_surfaces_a_failed_envelope() {
+    let rec = recorder(json!({
+        "ok": false,
+        "error_code": 401,
+        "description": "Unauthorized"
+    }));
+    let client = TelegramClient::new("123:ABC", rec.clone());
+
+    let error = client.get_me().await.unwrap_err();
+
+    assert!(matches!(error, Error::Api { code: 401, .. }), "{error:?}");
+    assert_eq!(rec.calls.lock().unwrap().len(), 1);
+}
+
+/// A 429 arrives as a *successful* transport answer, so it is the envelope gate
+/// that has to turn it into an error — and it has to keep the server's hint,
+/// because a wrapper that dropped it would turn a rate limit into a hot loop.
+#[tokio::test]
+#[allow(deprecated)]
+async fn legacy_wrappers_surface_a_rate_limited_envelope() {
+    let rec = recorder(json!({
+        "ok": false,
+        "error_code": 429,
+        "description": "Too Many Requests: retry after 7",
+        "parameters": { "retry_after": 7 }
+    }));
+    let client = TelegramClient::new("123:ABC", rec.clone());
+
+    let me = client.get_me().await.unwrap_err();
+    assert!(matches!(me, Error::RateLimited { .. }), "{me:?}");
+    assert_eq!(me.retry_after(), Some(Duration::from_secs(7)), "{me:?}");
+
+    let sent = client.send_message(-1001, "Hallo").await.unwrap_err();
+    assert!(matches!(sent, Error::RateLimited { .. }), "{sent:?}");
+    assert_eq!(sent.retry_after(), Some(Duration::from_secs(7)), "{sent:?}");
+
+    assert_eq!(
+        rec.calls.lock().unwrap().len(),
+        2,
+        "a body-level 429 is reported, never retried on the wrapper's behalf"
+    );
+}
+
+/// An answer with no `result` is a decoding failure, not an empty success — for
+/// both wrappers, exactly as on the typed path.
+#[tokio::test]
+#[allow(deprecated)]
+async fn legacy_wrappers_reject_an_envelope_without_result() {
+    let rec = recorder(json!({ "ok": true }));
+    let client = TelegramClient::new("123:ABC", rec.clone());
+
+    // A read keeps the decoding error: nothing changed, repeating is free.
+    let me = client.get_me().await.unwrap_err();
+    assert!(matches!(me, Error::Unexpected { .. }), "{me:?}");
+    assert!(me.to_string().contains("result"), "{me}");
+
+    // A send may report the same answer as `Ambiguous` (the bot replied, so the
+    // message may well exist) — either way it is not handed back as a success.
+    let sent = client.send_message(-1001, "Hallo").await.unwrap_err();
+    assert!(
+        matches!(sent, Error::Unexpected { .. } | Error::Ambiguous { .. }),
+        "{sent:?}"
+    );
 }
