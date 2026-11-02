@@ -433,19 +433,44 @@ impl<T: Transport> TelegramClient<T> {
     /// Deprecated: [`Self::send_text`] returns the typed [`Message`] and
     /// [`Self::send_message_request`] exposes the full request surface.
     ///
+    /// The call takes the same road as `send_message_request`: the request is
+    /// built as a [`SendMessage`] and validated before anything is posted, and
+    /// the answer goes through the same envelope check before it is handed
+    /// back. Validation and error handling are therefore identical to the typed
+    /// path; only the return type still differs.
+    ///
     /// # Errors
     ///
-    /// Propagates transport and Bot API errors.
+    /// [`Error::InvalidRequest`] for an unusable chat, an empty text or one over
+    /// [`MAX_MESSAGE_TEXT`](crate::send::MAX_MESSAGE_TEXT) UTF-16 code units, plus
+    /// transport, rate-limit, Bot API and decoding failures — a `{"ok": false}`
+    /// body or one without `result` is an error, never a successful envelope.
     ///
     /// ```rust
-    /// use telegram_api_client::{MockTransport, TelegramClient};
+    /// use telegram_api_client::send::MAX_MESSAGE_TEXT;
+    /// use telegram_api_client::{Error, MockTransport, TelegramClient};
     ///
     /// # async fn demo() -> telegram_api_client::Result<()> {
+    /// // An empty text never reaches the network any more.
     /// let transport = MockTransport::new();
     /// let client = TelegramClient::new("123:ABC", transport.clone());
     /// # #[allow(deprecated)]
-    /// client.send_message(-1001, "Hallo").await?;
-    /// assert_eq!(transport.last_call().unwrap().body["chat_id"], serde_json::json!(-1001));
+    /// let error = client.send_message(-1001, " ").await.unwrap_err();
+    /// assert!(matches!(error, Error::InvalidRequest { field: "text", .. }));
+    /// assert!(transport.calls().is_empty(), "rejected before the call");
+    ///
+    /// // The boundary pair: the limit itself passes, one unit more does not.
+    /// # #[allow(deprecated)]
+    /// let envelope = client
+    ///     .send_message(-1001, &"a".repeat(MAX_MESSAGE_TEXT))
+    ///     .await?;
+    /// assert_eq!(envelope["ok"], true);
+    /// # #[allow(deprecated)]
+    /// let error = client
+    ///     .send_message(-1001, &"a".repeat(MAX_MESSAGE_TEXT + 1))
+    ///     .await
+    ///     .unwrap_err();
+    /// assert!(matches!(error, Error::InvalidRequest { field: "text", .. }));
     /// # Ok(()) }
     /// ```
     #[deprecated(
@@ -453,8 +478,13 @@ impl<T: Transport> TelegramClient<T> {
         note = "use `send_text` for a typed Message, or `send_message_request(&SendMessage)`"
     )]
     pub async fn send_message(&self, chat_id: i64, text: &str) -> Result<serde_json::Value> {
-        let payload = json!({ "chat_id": chat_id, "text": text });
-        self.post("sendMessage", &Payload::Json(payload)).await
+        let request = SendMessage::new(chat_id, text);
+        request.validate()?;
+        let response = self.call("sendMessage", &request).await?;
+        // The envelope goes back as it arrived, but it is still checked: a
+        // failed body or one without `result` must not read as a success.
+        take_result::<serde_json::Value>("sendMessage", &response)?;
+        Ok(response)
     }
 
     /// Sends plain text and returns the created [`Message`].
@@ -1011,22 +1041,42 @@ impl<T: Transport> TelegramClient<T> {
     ///
     /// Deprecated: [`Self::me`] returns the typed [`User`].
     ///
+    /// Returns the raw envelope, but the answer goes through the same envelope
+    /// check as `me`: a body-level failure or a reply without `result` is an
+    /// error rather than a value handed back as a success.
+    ///
     /// # Errors
     ///
-    /// Propagates transport and Bot API errors.
+    /// [`Error::Api`] / [`Error::RateLimited`] for a failed answer,
+    /// [`Error::Unexpected`] when the envelope carries no `result`, plus
+    /// transport and decoding failures.
     ///
     /// ```rust
-    /// use telegram_api_client::{MockTransport, TelegramClient};
+    /// use telegram_api_client::{Error, MockReply, MockTransport, TelegramClient};
     ///
     /// # async fn demo() -> telegram_api_client::Result<()> {
-    /// let client = TelegramClient::new("123:ABC", MockTransport::new());
+    /// let transport = MockTransport::new();
+    /// transport.push(MockReply::result(serde_json::json!({"id": 7, "is_bot": true})));
+    /// let client = TelegramClient::new("123:ABC", transport.clone());
+    ///
+    /// // The whole envelope, exactly as in 0.1 ...
     /// # #[allow(deprecated)]
-    /// client.get_me().await?;
+    /// let envelope = client.get_me().await?;
+    /// assert_eq!(envelope["result"]["id"], 7);
+    ///
+    /// // ... but an answer the transport could not judge, without a `result`,
+    /// // is no longer a success.
+    /// transport.push(MockReply::Raw(serde_json::json!({"ok": true})));
+    /// # #[allow(deprecated)]
+    /// let error = client.get_me().await.unwrap_err();
+    /// assert!(matches!(error, Error::Unexpected { .. }));
     /// # Ok(()) }
     /// ```
     #[deprecated(since = "0.1.1", note = "use `me` for a typed User")]
     pub async fn get_me(&self) -> Result<serde_json::Value> {
-        self.post("getMe", &Payload::Json(json!({}))).await
+        let response = self.call("getMe", &json!({})).await?;
+        take_result::<serde_json::Value>("getMe", &response)?;
+        Ok(response)
     }
 
     /// Like [`Self::get_me`], but typed.

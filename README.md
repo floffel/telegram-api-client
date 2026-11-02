@@ -125,8 +125,10 @@ request to `multipart/form-data`.
 
 The two 0.1 convenience wrappers `send_message(chat_id, text)` and `get_me()`
 still exist with their original signatures and are **deprecated** since 0.1.1;
-they return the raw `serde_json::Value` envelope. Use `send_text`,
-`send_message_request` and `me` instead.
+they return the raw `serde_json::Value` envelope. They take the same road as the
+typed methods — the request is validated before it is posted and the answer goes
+through the same `result` gate — so the only difference that is left is the
+return type. Use `send_text`, `send_message_request` and `me` instead.
 
 Reply/inline keyboards are typed (`ReplyMarkup`, `InlineKeyboardMarkup`,
 `KeyboardButton`, …), as are `MessageEntity`, `LinkPreviewOptions`, `ChatId`
