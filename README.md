@@ -297,8 +297,10 @@ compiling and fails loudly instead of silently dropping the file.
 - **Validation before the wire.** Text length is counted in UTF-16 code units
   like Telegram does (4096 for text, 1024 for captions), coordinates must lie in
   `-90..=90` / `-180..=180`, album sizes in `2..=10`, poll options in `2..=12`,
-  uploads within the size and MIME rules above. Violations are
-  `Error::InvalidRequest { field, .. }` — no network call.
+  uploads within the size and MIME rules above, and a `message_thread_id` that
+  is set must be positive — it is a message id, so `0` and negative values name
+  no forum topic. Violations are `Error::InvalidRequest { field, .. }` — no
+  network call.
 - **429 is first class.** `Error::RateLimited { retry_after, .. }` keeps
   Telegram's `parameters.retry_after`; if only the description carries the hint
   it is parsed out, case-insensitively, from a scan that allocates nothing and is

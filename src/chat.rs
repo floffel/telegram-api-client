@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
-use crate::send::validate_chat;
+use crate::send::{validate_chat, validate_thread};
 use crate::types::{ChatAction, ChatId, ChatMemberStatus};
 
 /// `sendChatAction` body — the "typing…" indicator.
@@ -21,6 +21,8 @@ pub struct SendChatAction {
     /// What the bot pretends to be doing.
     pub action: ChatAction,
     /// Forum topic the action belongs to.
+    ///
+    /// The id of the topic's opening message; must be positive when set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message_thread_id: Option<i64>,
 }
@@ -42,11 +44,31 @@ impl SendChatAction {
         Self::new(chat_id, ChatAction::Typing)
     }
 
-    /// Checks the chat reference and the action.
+    /// Checks the chat reference, the action and the forum-topic id.
     ///
     /// # Errors
     ///
-    /// [`Error::InvalidRequest`] for an unusable chat or an empty action.
+    /// [`Error::InvalidRequest`] for an unusable chat, an empty action, or a
+    /// `message_thread_id` that is set but not positive.
+    ///
+    /// ```
+    /// use telegram_api_client::{ChatAction, Error, SendChatAction};
+    ///
+    /// // Outside a forum topic: nothing to check.
+    /// assert!(SendChatAction::typing(-1001).validate().is_ok());
+    ///
+    /// // A topic's opening message id, so the smallest usable value is 1.
+    /// let mut action = SendChatAction::new(-1001, ChatAction::Typing);
+    /// action.message_thread_id = Some(1);
+    /// assert!(action.validate().is_ok());
+    ///
+    /// // 0 names no message, so it names no thread either.
+    /// action.message_thread_id = Some(0);
+    /// assert!(matches!(
+    ///     action.validate(),
+    ///     Err(Error::InvalidRequest { field: "message_thread_id", .. })
+    /// ));
+    /// ```
     pub fn validate(&self) -> Result<()> {
         validate_chat("chat_id", &self.chat_id)?;
         if self.action.as_str().is_empty() {
@@ -55,7 +77,7 @@ impl SendChatAction {
                 reason: "must not be empty".to_string(),
             });
         }
-        Ok(())
+        validate_thread("message_thread_id", self.message_thread_id)
     }
 }
 
