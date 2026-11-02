@@ -7,8 +7,8 @@ use std::time::Duration;
 use telegram_api_client::{
     guess_mime, is_idempotent, is_valid_mime, send::MAX_POLL_OPTION, ChatId, ChatMember,
     ChatMemberPresence, ChatMemberStatus, EditTarget, EntityKind, Error, File, GetFile, InputMedia,
-    InputMediaKind, MessageEntity, MockTransport, MultipartFile, MultipartForm, ParseMode,
-    PollType, RetryPolicy, SendMessage, SendPoll, TelegramClient, Update, UpdateCursor,
+    InputMediaKind, MenuButton, MessageEntity, MockTransport, MultipartFile, MultipartForm,
+    ParseMode, PollType, RetryPolicy, SendMessage, SendPoll, TelegramClient, Update, UpdateCursor,
     MAX_DOWNLOAD_BYTES, MAX_FILE_ID_BYTES,
 };
 
@@ -389,6 +389,24 @@ proptest! {
             "file_size": size,
         })).unwrap();
         prop_assert_eq!(file.fits_download_limit(), Some(size <= MAX_DOWNLOAD_BYTES as u64));
+    }
+
+    /// A known menu button keeps its unknown members through a round trip, so a
+    /// newer Bot API field cannot be dropped on the way out.
+    #[test]
+    fn menu_button_preserves_extra_fields(
+        extra in prop::collection::btree_map("x[a-z]{1,6}", any::<i64>(), 0..4)
+    ) {
+        let mut button = MenuButton::commands();
+        for (key, value) in &extra {
+            button = button.with_extra(key.clone(), Value::from(*value));
+        }
+        let json = serde_json::to_value(&button).unwrap();
+        for key in extra.keys() {
+            prop_assert!(json.get(key).is_some(), "lost {key}");
+        }
+        let back: MenuButton = serde_json::from_value(json).unwrap();
+        prop_assert_eq!(back, button);
     }
 
     /// Every quiz keeps its correct answer inside the option list.

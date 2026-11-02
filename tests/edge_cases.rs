@@ -1,14 +1,14 @@
 //! Edge cases: the last valid value, the first invalid one, and permissive
 //! decoding in both directions.
 
-use serde_json::json;
+use serde_json::{json, Value};
 use telegram_api_client::{
     AnswerCallbackQuery, AnswerInlineQuery, BanChatMember, ChatId, ChatType, CopyMessage,
     DeleteMessage, EditMessageCaption, EditMessageText, EditTarget, EntityKind, Error,
     GetChatMember, GetFile, GetUpdates, InlineQueryResult, InputMedia, LinkPreviewOptions,
-    MessageEntity, MockReply, MockTransport, ParseMode, PollType, ReplyMarkup, SendDice,
-    SendLocation, SendMediaGroup, SendMessage, SendPhoto, SendPoll, SendVenue, SetWebhook,
-    TelegramClient, Update, UpdateCursor, WebhookGuard, WebhookInfo,
+    MenuButton, MessageEntity, MockReply, MockTransport, ParseMode, PollType, ReplyMarkup,
+    SendDice, SendLocation, SendMediaGroup, SendMessage, SendPhoto, SendPoll, SendVenue,
+    SetChatMenuButton, SetWebhook, TelegramClient, Update, UpdateCursor, WebhookGuard, WebhookInfo,
 };
 
 const CHAT: i64 = -1001;
@@ -1014,6 +1014,97 @@ fn unknown_enum_variants_are_carried() {
     // And they round-trip.
     let back = serde_json::to_value(&entity).unwrap();
     assert_eq!(back["type"], "spoiler_v2");
+}
+
+/// A known menu button keeps the members this crate does not model — at the top
+/// level and inside the nested `web_app` object — and writes them back.
+#[test]
+fn menu_button_preserves_unknown_members_on_known_variants() {
+    for raw in [
+        r#"{"type":"default","badge":"new"}"#,
+        r#"{"type":"commands","badge":"new","scope":{"chat":1}}"#,
+        r#"{"type":"web_app","text":"Open","badge":7,"web_app":{"url":"https://example.com","color":"red"}}"#,
+    ] {
+        let original: Value = serde_json::from_str(raw).unwrap();
+        let button: MenuButton = serde_json::from_value(original.clone()).unwrap();
+        assert_eq!(
+            serde_json::to_value(&button).unwrap(),
+            original,
+            "lost a member of {raw}"
+        );
+    }
+
+    // The preserved members are readable, and a plain builder starts empty.
+    let button: MenuButton = serde_json::from_str(
+        r#"{"type":"web_app","text":"Open","badge":7,"web_app":{"url":"https://example.com","color":"red"}}"#,
+    )
+    .unwrap();
+    let extra = button.extra().expect("known variant");
+    assert_eq!(extra["badge"], 7);
+    assert_eq!(extra["web_app"]["color"], "red");
+    assert_eq!(
+        MenuButton::web_app("Open", "https://example.com").extra(),
+        Some(&serde_json::Map::new())
+    );
+
+    // A preserved member never displaces a modelled one.
+    let crafted = MenuButton::web_app("Open", "https://example.com")
+        .with_extra("type", json!("ignored"))
+        .with_extra("text", json!("ignored"))
+        .with_extra(
+            "web_app",
+            json!({"url": "https://evil.example", "color": "red"}),
+        );
+    assert_eq!(
+        serde_json::to_value(&crafted).unwrap(),
+        json!({
+            "type": "web_app",
+            "text": "Open",
+            "web_app": {"url": "https://example.com", "color": "red"},
+        })
+    );
+
+    // An unknown button type keeps its whole payload, and `extra` has nothing
+    // to add on top of it.
+    let unknown = MenuButton::Unknown(json!({"type": "future"})).with_extra("x", json!([1]));
+    assert_eq!(unknown.extra(), None);
+    assert_eq!(
+        serde_json::to_value(&unknown).unwrap(),
+        json!({"type": "future"})
+    );
+    let parsed: MenuButton = serde_json::from_str(r#"{"type":"future","x":[1]}"#).unwrap();
+    assert_eq!(parsed.extra(), None);
+    assert_eq!(
+        serde_json::to_value(&parsed).unwrap(),
+        json!({"type": "future", "x": [1]})
+    );
+
+    // Inputs that are not an object at all are carried, not rejected.
+    for raw in [r#""default""#, "7", "null", "[]"] {
+        let original: Value = serde_json::from_str(raw).unwrap();
+        let button: MenuButton = serde_json::from_value(original.clone()).unwrap();
+        assert_eq!(button, MenuButton::Unknown(original.clone()), "{raw}");
+        assert_eq!(serde_json::to_value(&button).unwrap(), original, "{raw}");
+    }
+
+    // A `web_app` payload that lost its shape still parses into the variant,
+    // with the modelled members left empty.
+    let broken: MenuButton =
+        serde_json::from_str(r#"{"type":"web_app","text":5,"web_app":"nope"}"#).unwrap();
+    assert_eq!(broken, MenuButton::web_app("", ""));
+
+    // `MenuButton::default()` is the `default` button, so `SetChatMenuButton`'s
+    // derived default matches the wire default.
+    assert_eq!(MenuButton::default(), MenuButton::default_menu());
+
+    // The whole request round-trips too, not just the button.
+    let request: SetChatMenuButton =
+        serde_json::from_str(r#"{"chat_id":1,"menu_button":{"type":"default","badge":"new"}}"#)
+            .unwrap();
+    assert_eq!(
+        serde_json::to_value(&request).unwrap(),
+        json!({"chat_id": 1, "menu_button": {"type": "default", "badge": "new"}})
+    );
 }
 
 #[test]

@@ -362,9 +362,19 @@ fn callback_and_menu_builders_compose() {
         assert_eq!(decoded, button, "{encoded}");
     }
 
-    let global = SetChatMenuButton::global(MenuButton::Commands);
+    let tagged = MenuButton::commands().with_extra("badge", json!("new"));
+    assert_eq!(
+        tagged.extra().and_then(|extra| extra.get("badge")),
+        Some(&json!("new"))
+    );
+    assert_eq!(
+        MenuButton::Unknown(json!({ "type": "future" })).extra(),
+        None
+    );
+
+    let global = SetChatMenuButton::global(MenuButton::commands());
     assert!(global.validate().is_ok());
-    let scoped = SetChatMenuButton::for_chat(1_i64, MenuButton::Default);
+    let scoped = SetChatMenuButton::for_chat(1_i64, MenuButton::default_menu());
     assert_eq!(scoped.chat_id, Some(ChatId::Id(1)));
     assert!(scoped.validate().is_ok());
 }

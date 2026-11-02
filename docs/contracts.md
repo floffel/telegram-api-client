@@ -124,6 +124,54 @@ refused with `Error::InvalidRequest { field: "inline_message_id" }` instead
 | Source URL | <https://core.telegram.org/bots/api#editmessagetext> |
 | Fetched | 2026-11-02 |
 
+## `MenuButton`
+
+Quote, "MenuButton": *"This object describes the bot's menu button in a private
+chat. It should be one of `MenuButtonCommands`, `MenuButtonWebApp`,
+`MenuButtonDefault`"* — a tagged union on `type`. Three member names are
+modelled; everything else is carried.
+
+| `type` | Modelled as | Members the crate models |
+| --- | --- | --- |
+| `default` | `MenuButton::Default` | `type` |
+| `commands` | `MenuButton::Commands` | `type` |
+| `web_app` | `MenuButton::WebApp` | `type`, `text`, `web_app.url`; `text` and `web_app.url` are required strings |
+| anything else | `MenuButton::Unknown(Value)` | the whole object, verbatim |
+
+Every other member of a known variant is kept in `extra` and written back
+unchanged, including the members of the nested `web_app` object that sit next
+to `url`. The modelled members win over a preserved copy of the same name, so a
+crafted `extra` cannot rewrite `type`, `text` or the URL. A recognized
+`web_app` object missing either required string is a deserialization error; the
+crate does not substitute empty strings (#18).
+`tests/edge_cases.rs::menu_button_preserves_unknown_members_on_known_variants`
+pins the round trip for all three known variants; `tests/properties.rs` does the
+same for arbitrary member names and values.
+
+| Item | Value |
+| --- | --- |
+| Source URL | <https://core.telegram.org/bots/api#menubutton> |
+| Fetched | 2026-11-02 |
+
+## Inline answer and result button validation
+
+Quote, `answerInlineQuery` `next_offset`: *"Offset length can't exceed 64
+bytes."* Quote, `InlineQueryResultsButton`: *"You must use exactly one of the
+optional fields."* Its `start_parameter` is 1-64 characters from `A-Z`, `a-z`,
+`0-9`, `_` and `-`; `web_app` is a `WebAppInfo`, whose `url` is an HTTPS URL.
+
+The crate validates all four rules before posting `answerInlineQuery`, and
+validates a `MenuButtonWebApp` label and HTTPS URL in
+`SetChatMenuButton::validate`. Callback answer text uses Telegram's documented
+200-character limit as UTF-16 code units.
+
+| Item | Value |
+| --- | --- |
+| Source URL | <https://core.telegram.org/bots/api#answerinlinequery> |
+| Source URL | <https://core.telegram.org/bots/api#inlinequeryresultsbutton> |
+| Source URL | <https://core.telegram.org/bots/api#setchatmenubutton> |
+| Fetched | 2026-11-06 |
+
 ## Known gaps (tracked, not hidden)
 
 - `Message` still models the subset the crate can act on (id, chat, sender,
