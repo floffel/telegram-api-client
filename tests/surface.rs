@@ -22,7 +22,7 @@ use telegram_api_client::{
     SendChatAction, SendContact, SendDice, SendDocument, SendLocation, SendMediaGroup, SendMessage,
     SendPhoto, SendPoll, SendVenue, SendVideo, SendVoice, SetChatMenuButton, SetWebhook, Sleeper,
     TelegramClient, ThreadSleeper, UnpinChatMessage, Update, UpdateCursor, UploadFile, User,
-    WebAppInfo, WebhookInfo,
+    WebAppInfo, WebhookInfo, MAX_INLINE_RESULT_ID_BYTES,
 };
 
 fn markup() -> ReplyMarkup {
@@ -327,6 +327,13 @@ fn callback_and_menu_builders_compose() {
 
     let raw = InlineQueryResult::new(json!({"type": "article", "id": "1"}));
     assert_eq!(raw.value["type"], json!("article"));
+    assert!(raw.validate().is_ok(), "a plain article result is usable");
+    assert_eq!(MAX_INLINE_RESULT_ID_BYTES, 64);
+    assert!(
+        InlineQueryResult::new(json!({"type": "article", "id": "x".repeat(65)}))
+            .validate()
+            .is_err()
+    );
 
     let button = InlineQueryResultsButton::start("Go", "param");
     assert_eq!(button.start_parameter.as_deref(), Some("param"));

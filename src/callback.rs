@@ -1,5 +1,7 @@
 //! Callback answers, inline query answers and the chat menu button.
 
+use std::collections::HashSet;
+
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::{json, Value};
 
@@ -11,6 +13,26 @@ use crate::types::{ChatId, WebAppInfo};
 pub const MAX_CALLBACK_TEXT: usize = 200;
 /// Most results a single inline query answer may carry.
 pub const MAX_INLINE_RESULTS: usize = 50;
+/// Longest accepted `id` of an inline query result, in bytes.
+///
+/// The Bot API calls `id` *"Unique identifier for this result, 1-64 Bytes"*, so
+/// the limit counts UTF-8 bytes, not characters.
+///
+/// ```
+/// use telegram_api_client::{InlineQueryResult, MAX_INLINE_RESULT_ID_BYTES};
+/// use serde_json::json;
+///
+/// let id = "a".repeat(MAX_INLINE_RESULT_ID_BYTES);
+/// assert!(InlineQueryResult::new(json!({"type": "article", "id": id}))
+///     .validate()
+///     .is_ok());
+///
+/// let id = "a".repeat(MAX_INLINE_RESULT_ID_BYTES + 1);
+/// assert!(InlineQueryResult::new(json!({"type": "article", "id": id}))
+///     .validate()
+///     .is_err());
+/// ```
+pub const MAX_INLINE_RESULT_ID_BYTES: usize = 64;
 
 /// `answerCallbackQuery` body.
 ///
@@ -139,6 +161,74 @@ impl InlineQueryResult {
             }),
         }
     }
+
+    /// Checks that this is a result the Bot API will accept.
+    ///
+    /// The value must be a JSON object with a non-empty string `type` and a
+    /// string `id` of 1 to [`MAX_INLINE_RESULT_ID_BYTES`] bytes. Every other
+    /// member is left exactly as it is, so a result shape this crate does not
+    /// model still passes — including a `type` that does not exist yet.
+    ///
+    /// ```
+    /// use telegram_api_client::InlineQueryResult;
+    /// use serde_json::json;
+    ///
+    /// let custom = InlineQueryResult::new(
+    ///     json!({"type": "gif", "id": "9", "gif_url": "https://example.com/y.gif"}),
+    /// );
+    /// assert!(custom.validate().is_ok());
+    ///
+    /// // Not an object, no type, an empty id and an overlong id are refused.
+    /// for value in [
+    ///     json!(null),
+    ///     json!({"id": "9"}),
+    ///     json!({"type": "gif", "id": ""}),
+    ///     json!({"type": "gif", "id": "x".repeat(65)}),
+    /// ] {
+    ///     assert!(InlineQueryResult::new(value).validate().is_err());
+    /// }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidRequest`] naming `results` for a value that is not a JSON
+    /// object, and `type` or `id` for the member that is wrong.
+    pub fn validate(&self) -> Result<()> {
+        check_result(&self.value, "result")
+            .map(|_| ())
+            .map_err(|(field, reason)| Error::InvalidRequest { field, reason })
+    }
+}
+
+/// Checks one inline result and returns its `id` on success.
+///
+/// `path` names the value in the error message: `result` for a single one,
+/// `results[3]` inside an answer. The returned field is the wrong member
+/// (`type` or `id`), or `results` when the value is not an object at all.
+fn check_result<'a>(
+    value: &'a Value,
+    path: &str,
+) -> std::result::Result<&'a str, (&'static str, String)> {
+    let Some(object) = value.as_object() else {
+        return Err(("results", format!("{path} must be a JSON object")));
+    };
+    match object.get("type") {
+        Some(Value::String(kind)) if !kind.trim().is_empty() => {}
+        _ => return Err(("type", format!("{path}.type must be a non-empty string"))),
+    }
+    let Some(id) = object.get("id").and_then(Value::as_str) else {
+        return Err(("id", format!("{path}.id must be a string")));
+    };
+    if id.is_empty() || id.len() > MAX_INLINE_RESULT_ID_BYTES {
+        return Err((
+            "id",
+            format!(
+                "{path}.id must be 1 to {MAX_INLINE_RESULT_ID_BYTES} bytes, got {}",
+                id.len()
+            ),
+        ));
+    }
+    Ok(id)
 }
 
 /// A button shown above the inline results.
@@ -229,12 +319,37 @@ impl AnswerInlineQuery {
         self
     }
 
-    /// Checks the query id and the result count.
+    /// Checks the query id, the result count and every result's structure.
+    ///
+    /// Each result must be a JSON object with a non-empty string `type` and a
+    /// unique string `id` of 1 to [`MAX_INLINE_RESULT_ID_BYTES`] bytes; the Bot
+    /// API rejects the whole answer otherwise. Nothing is rewritten — a result
+    /// carries every other member verbatim.
+    ///
+    /// ```
+    /// use telegram_api_client::{AnswerInlineQuery, InlineQueryResult};
+    /// use serde_json::json;
+    ///
+    /// let good = InlineQueryResult::article("1", "Ping", "Pong");
+    /// let answer = AnswerInlineQuery::new("q1", vec![good.clone()]);
+    /// assert!(answer.validate().is_ok());
+    ///
+    /// // A duplicate id, a missing type and an empty id fail before the wire.
+    /// for bad in [
+    ///     vec![good.clone(), good.clone()],
+    ///     vec![InlineQueryResult::new(json!({"id": "2"}))],
+    ///     vec![InlineQueryResult::new(json!({"type": "article", "id": ""}))],
+    /// ] {
+    ///     assert!(AnswerInlineQuery::new("q1", bad).validate().is_err());
+    /// }
+    /// ```
     ///
     /// # Errors
     ///
-    /// [`Error::InvalidRequest`] for an empty query id, zero results, or more
-    /// than [`MAX_INLINE_RESULTS`] results.
+    /// [`Error::InvalidRequest`] for an empty query id, zero results, more than
+    /// [`MAX_INLINE_RESULTS`] results, a result that is not a JSON object, a
+    /// missing, non-string or blank `type`, and a missing, non-string, empty,
+    /// overlong or duplicate `id`.
     pub fn validate(&self) -> Result<()> {
         if self.inline_query_id.trim().is_empty() {
             return Err(Error::InvalidRequest {
@@ -250,6 +365,23 @@ impl AnswerInlineQuery {
                     self.results.len()
                 ),
             });
+        }
+        // The count is bounded, so the set stays small.
+        let mut ids = HashSet::with_capacity(self.results.len());
+        for (index, result) in self.results.iter().enumerate() {
+            let path = format!("results[{index}]");
+            let id = check_result(&result.value, &path).map_err(|(_, reason)| {
+                Error::InvalidRequest {
+                    field: "results",
+                    reason,
+                }
+            })?;
+            if !ids.insert(id) {
+                return Err(Error::InvalidRequest {
+                    field: "results",
+                    reason: format!("{path}.id \"{id}\" duplicates an earlier result"),
+                });
+            }
         }
         Ok(())
     }
