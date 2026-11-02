@@ -348,6 +348,129 @@ fn chat_member_requires_status_and_user() {
     assert!(!fresh.is_present(), "an unknown status is not presence");
 }
 
+/// A `restricted` member carries an `is_member` flag, and it decides presence
+/// (issue #24). Reading presence off `status` alone reported a restricted user
+/// who had been pushed out of the chat as present, so a presence check turned
+/// into a false positive.
+#[test]
+fn restricted_non_members_are_not_present() {
+    use telegram_api_client::{ChatMember, ChatMemberPresence, ChatMemberStatus};
+
+    fn member(status: &str, is_member: Option<bool>) -> ChatMember {
+        ChatMember {
+            status: ChatMemberStatus::from(status),
+            is_member,
+            ..ChatMember::default()
+        }
+    }
+
+    // The reported bug: restricted with the flag on false is outside the chat.
+    let outsider = member("restricted", Some(false));
+    assert!(
+        !outsider.is_present(),
+        "a restricted non-member is not there"
+    );
+    assert_eq!(outsider.presence(), ChatMemberPresence::Absent);
+
+    // The same status with the flag on true is a member with limits.
+    let insider = member("restricted", Some(true));
+    assert!(insider.is_present());
+    assert_eq!(insider.presence(), ChatMemberPresence::Present);
+
+    // A flag that was not sent is not read as an absence: only an explicit
+    // `false` takes the user out of the chat.
+    let unset = member("restricted", None);
+    assert!(unset.is_present());
+    assert_eq!(unset.presence(), ChatMemberPresence::Present);
+
+    // The flag belongs to `restricted` alone. A crafted `is_member: false` on
+    // another status must not make a member disappear.
+    for status in ["creator", "administrator", "member"] {
+        let present = member(status, Some(false));
+        assert!(present.is_present(), "{status} is in the chat");
+        assert_eq!(present.presence(), ChatMemberPresence::Present);
+    }
+
+    // `left` and `kicked` are absent whatever the flag claims.
+    for status in ["left", "kicked"] {
+        let gone = member(status, Some(true));
+        assert!(!gone.is_present(), "{status} is outside the chat");
+        assert_eq!(gone.presence(), ChatMemberPresence::Absent);
+    }
+
+    // A status this crate does not know yet is neither present nor absent. It
+    // stays visible as `Unknown` instead of being collapsed into "absent".
+    for status in ["ghost", ""] {
+        let fresh = member(status, None);
+        assert!(!fresh.is_present());
+        assert_eq!(fresh.presence(), ChatMemberPresence::Unknown, "{status}");
+    }
+}
+
+/// The `is_member` flag decodes in both spellings, rejects a wrong shape, and
+/// is left off the wire again when the payload never carried it.
+#[test]
+fn restricted_flag_survives_the_wire() {
+    use telegram_api_client::{ChatMember, ChatMemberStatus};
+
+    let snake: ChatMember =
+        serde_json::from_str(r#"{"status":"restricted","user":{"id":42},"is_member":false}"#)
+            .expect("snake_case flag");
+    assert_eq!(snake.is_member, Some(false));
+
+    let camel: ChatMember =
+        serde_json::from_str(r#"{"status":"restricted","user":{"id":42},"isMember":true}"#)
+            .expect("camelCase flag");
+    assert_eq!(camel.is_member, Some(true));
+
+    // A flag of the wrong shape is a decode error, not a silent `false`.
+    assert!(serde_json::from_str::<ChatMember>(
+        r#"{"status":"restricted","user":{"id":42},"is_member":"no"}"#
+    )
+    .is_err());
+
+    // An unset flag is omitted instead of being written as `null`, so a
+    // re-serialized member keeps the shape Telegram sent.
+    let plain = ChatMember {
+        status: ChatMemberStatus::Member,
+        ..ChatMember::default()
+    };
+    let encoded = serde_json::to_value(&plain).expect("serialize");
+    assert!(encoded.get("is_member").is_none(), "{encoded}");
+
+    let restricted: ChatMember =
+        serde_json::from_str(r#"{"status":"restricted","user":{"id":42},"is_member":false}"#)
+            .expect("restricted");
+    let encoded = serde_json::to_value(&restricted).expect("serialize");
+    assert_eq!(encoded["is_member"], serde_json::json!(false), "{encoded}");
+}
+
+/// A restricted user who is no longer a member leaves the chat, even though
+/// their status is neither `left` nor `kicked` (issue #24).
+#[test]
+fn a_restricted_non_member_transition_is_a_leave() {
+    use telegram_api_client::ChatMemberUpdated;
+
+    let update: ChatMemberUpdated = serde_json::from_str(
+        r#"{"chat":{"id":-1},"date":1,
+            "old_chat_member":{"status":"member","user":{"id":9}},
+            "new_chat_member":{"status":"restricted","user":{"id":9},"is_member":false}}"#,
+    )
+    .expect("restricted non-member");
+    assert!(update.left(), "out of the chat is a leave");
+    assert!(!update.joined());
+
+    // The way back — still restricted, but a member again — is a join.
+    let back: ChatMemberUpdated = serde_json::from_str(
+        r#"{"chat":{"id":-1},"date":1,
+            "old_chat_member":{"status":"restricted","user":{"id":9},"is_member":false},
+            "new_chat_member":{"status":"restricted","user":{"id":9},"is_member":true}}"#,
+    )
+    .expect("restricted member");
+    assert!(back.joined());
+    assert!(!back.left());
+}
+
 /// A member update carries the same required members, so a truncated one is
 /// rejected one level up as well (the update itself still defaults whole
 /// members it was not sent, which is the documented permissive behaviour).

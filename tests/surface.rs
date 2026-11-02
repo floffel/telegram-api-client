@@ -11,17 +11,18 @@ use serde_json::json;
 use telegram_api_client::send::MAX_FILENAME_BYTES;
 use telegram_api_client::{
     parse_retry_after, AnswerCallbackQuery, AnswerInlineQuery, BanChatMember, CallbackQuery,
-    ChatAction, ChatId, ChatType, CopyMessage, DeleteMessage, DeleteWebhook, DeliveryOptions,
-    EditMessageCaption, EditMessageMedia, EditMessageReplyMarkup, EditMessageText, EditTarget,
-    EntityKind, Error, File, ForwardMessage, GetChatMember, GetUpdates, InlineKeyboardButton,
-    InlineKeyboardMarkup, InlineQuery, InlineQueryResult, InlineQueryResultsButton, InputMedia,
-    InputMediaKind, KeyboardButton, LinkPreviewOptions, MediaOptions, MenuButton, Message,
-    MessageEntity, MessageOptions, MockTransport, MultipartFile, MultipartForm, NoDelay, ParseMode,
-    PinChatMessage, PollType, ReplyKeyboardMarkup, ReplyKeyboardRemove, ReplyMarkup, RetryPolicy,
-    SendAnimation, SendAudio, SendChatAction, SendContact, SendDice, SendDocument, SendLocation,
-    SendMediaGroup, SendMessage, SendPhoto, SendPoll, SendVenue, SendVideo, SendVoice,
-    SetChatMenuButton, SetWebhook, Sleeper, TelegramClient, ThreadSleeper, UnpinChatMessage,
-    Update, UpdateCursor, UploadFile, User, WebAppInfo, WebhookInfo,
+    ChatAction, ChatId, ChatMember, ChatMemberPresence, ChatMemberStatus, ChatType, CopyMessage,
+    DeleteMessage, DeleteWebhook, DeliveryOptions, EditMessageCaption, EditMessageMedia,
+    EditMessageReplyMarkup, EditMessageText, EditTarget, EntityKind, Error, File, ForwardMessage,
+    GetChatMember, GetUpdates, InlineKeyboardButton, InlineKeyboardMarkup, InlineQuery,
+    InlineQueryResult, InlineQueryResultsButton, InputMedia, InputMediaKind, KeyboardButton,
+    LinkPreviewOptions, MediaOptions, MenuButton, Message, MessageEntity, MessageOptions,
+    MockTransport, MultipartFile, MultipartForm, NoDelay, ParseMode, PinChatMessage, PollType,
+    ReplyKeyboardMarkup, ReplyKeyboardRemove, ReplyMarkup, RetryPolicy, SendAnimation, SendAudio,
+    SendChatAction, SendContact, SendDice, SendDocument, SendLocation, SendMediaGroup, SendMessage,
+    SendPhoto, SendPoll, SendVenue, SendVideo, SendVoice, SetChatMenuButton, SetWebhook, Sleeper,
+    TelegramClient, ThreadSleeper, UnpinChatMessage, Update, UpdateCursor, UploadFile, User,
+    WebAppInfo, WebhookInfo,
 };
 
 fn markup() -> ReplyMarkup {
@@ -413,6 +414,22 @@ fn chat_administration_builders_compose() {
         })
     ));
     assert!(SendChatAction::typing(-1001_i64).validate().is_ok());
+}
+
+#[test]
+fn chat_member_presence_is_exposed() {
+    let mut member = ChatMember::default();
+    assert_eq!(member.presence(), ChatMemberPresence::Unknown);
+    assert!(!member.is_present());
+
+    member.status = ChatMemberStatus::Restricted;
+    member.is_member = Some(false);
+    member.is_anonymous = Some(true);
+    assert_eq!(member.is_member, Some(false));
+    assert_eq!(member.presence(), ChatMemberPresence::Absent);
+
+    member.is_member = Some(true);
+    assert!(member.is_present());
 }
 
 #[test]

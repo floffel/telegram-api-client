@@ -115,6 +115,25 @@ means for this API is spelled out in the README under
   wrapper itself, and the envelope cases run against a transport that returns the
   body verbatim: `ok: false`, a missing `result`, and a body-level 429, whose
   `retry_after` hint survives the trip through the gate.
+- **A restricted non-member is no longer reported present** (#24).
+  `ChatMember::is_present` inferred presence from the status alone and treated
+  every status except `left`, `kicked` and `unknown` as present, but
+  `ChatMemberRestricted` carries a required `is_member` flag that is `false` for
+  a user who is currently outside the chat — so a restricted user who had been
+  pushed out read as present, and a presence check became a false positive.
+  `ChatMember` now models the flag (`is_member: Option<bool>`, decoded from
+  `is_member` as well as `isMember`, omitted again when unset) and the new
+  `ChatMember::presence()` returns `ChatMemberPresence::Present`, `Absent` or
+  `Unknown`: `restricted` with `is_member: false` is `Absent`, `left` and
+  `kicked` are `Absent` whatever the flag claims, the flag is ignored for every
+  other status (a `creator` with `is_member: false` is still the owner), and a
+  missing flag is not read as an absence. `is_present()` is now exactly
+  `presence() == Present`. **Breaking** for callers that build `ChatMember` with
+  a struct literal, because the struct has one more public field.
+  `tests/edge_cases.rs` pins both sides of the flag (set/unset, `true`/`false`,
+  restricted vs. every other status) and the wire spellings, `tests/properties.rs`
+  checks the rule for arbitrary statuses and flags plus the JSON round trip, and
+  `docs/contracts.md` records the quote and source.
 
 ## [0.1.8] - 2026-10-28
 

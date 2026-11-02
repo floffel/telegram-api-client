@@ -5,9 +5,10 @@ use proptest::prelude::*;
 use serde_json::{Map, Value};
 use std::time::Duration;
 use telegram_api_client::{
-    guess_mime, is_idempotent, is_valid_mime, send::MAX_POLL_OPTION, ChatId, EntityKind, Error,
-    InputMedia, InputMediaKind, MessageEntity, MultipartFile, MultipartForm, ParseMode, PollType,
-    RetryPolicy, SendMessage, SendPoll, Update, UpdateCursor,
+    guess_mime, is_idempotent, is_valid_mime, send::MAX_POLL_OPTION, ChatId, ChatMember,
+    ChatMemberPresence, ChatMemberStatus, EntityKind, Error, InputMedia, InputMediaKind,
+    MessageEntity, MultipartFile, MultipartForm, ParseMode, PollType, RetryPolicy, SendMessage,
+    SendPoll, Update, UpdateCursor,
 };
 
 proptest! {
@@ -81,6 +82,66 @@ proptest! {
             Value::from(name.as_str())
         );
         prop_assert_eq!(ChatId::username(format!("@{name}")), username);
+    }
+
+    /// Presence follows exactly the documented rule, for every status string
+    /// the Bot API could send and every value of the restricted flag. Only an
+    /// explicit `is_member: false` on `restricted` takes a user out of the
+    /// chat, and a status this crate does not know stays `Unknown` instead of
+    /// being collapsed into "absent" (issue #24).
+    #[test]
+    fn presence_matches_the_documented_rule(
+        status in "[a-z_]{0,16}",
+        is_member in any::<Option<bool>>(),
+    ) {
+        let status = ChatMemberStatus::from(status);
+        let member = ChatMember {
+            status: status.clone(),
+            is_member,
+            ..ChatMember::default()
+        };
+
+        let expected = match &status {
+            ChatMemberStatus::Creator
+            | ChatMemberStatus::Administrator
+            | ChatMemberStatus::Member => ChatMemberPresence::Present,
+            ChatMemberStatus::Restricted => {
+                if is_member == Some(false) {
+                    ChatMemberPresence::Absent
+                } else {
+                    ChatMemberPresence::Present
+                }
+            }
+            ChatMemberStatus::Left | ChatMemberStatus::Kicked => ChatMemberPresence::Absent,
+            _ => ChatMemberPresence::Unknown,
+        };
+
+        prop_assert_eq!(member.presence(), expected, "status {}", status);
+        prop_assert_eq!(
+            member.is_present(),
+            expected == ChatMemberPresence::Present,
+            "status {}",
+            status
+        );
+    }
+
+    /// The restricted flag survives a JSON round trip exactly as it was set —
+    /// `Some(true)`, `Some(false)` and unset stay three different things.
+    #[test]
+    fn the_restricted_flag_round_trips(
+        is_member in any::<Option<bool>>(),
+        is_anonymous in any::<Option<bool>>(),
+    ) {
+        let member = ChatMember {
+            status: ChatMemberStatus::Restricted,
+            is_member,
+            is_anonymous,
+            ..ChatMember::default()
+        };
+        let encoded = serde_json::to_string(&member).unwrap();
+        let decoded: ChatMember = serde_json::from_str(&encoded).unwrap();
+        prop_assert_eq!(decoded.is_member, is_member);
+        prop_assert_eq!(decoded, member, "{}", encoded);
     }
 
     /// The cursor never hands out an id twice and never walks backwards,
