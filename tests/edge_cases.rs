@@ -707,14 +707,32 @@ async fn missing_result_field_is_unexpected() {
 }
 
 #[tokio::test]
-async fn wrong_result_shape_is_a_payload_error() {
-    let (client, transport) = client();
-    transport.push(MockReply::result(json!("not a message")));
-    let error = client
+async fn wrong_result_shape_is_payload_for_a_read_and_ambiguous_for_a_send() {
+    // A `result` that does not decode is a decoding failure either way, but only
+    // a read may be repeated freely: a send whose answer was lost may already be
+    // delivered, so it is reported as ambiguous with the `Payload` error kept as
+    // the cause (issue #29).
+    let (reader, inbox) = client();
+    inbox.push(MockReply::result(json!("not a chat")));
+    let error = reader
+        .get_chat(&telegram_api_client::GetChat::new(CHAT))
+        .await
+        .unwrap_err();
+    assert!(matches!(error, Error::Payload { .. }), "{error:?}");
+    assert!(!error.is_ambiguous());
+
+    let (sender, outbox) = client();
+    outbox.push(MockReply::result(json!("not a message")));
+    let error = sender
         .send_photo(&SendPhoto::new(CHAT, "f"))
         .await
         .unwrap_err();
-    assert!(matches!(error, Error::Payload { .. }));
+    assert!(error.is_ambiguous(), "{error:?}");
+    let cause = std::error::Error::source(&error).expect("cause kept");
+    assert!(matches!(
+        cause.downcast_ref::<Error>(),
+        Some(Error::Payload { .. })
+    ));
 }
 
 // ---- secrets and redaction ---------------------------------------------

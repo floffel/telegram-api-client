@@ -2,6 +2,44 @@
 //!
 //! Every method validates its request locally, posts it through the
 //! [`Transport`], and decodes the `result` field into a typed value.
+//!
+//! Classification happens inside the retry loop, so it does not matter whether
+//! a transport reports a failure as `Err` or hands the envelope back as `Ok`: a
+//! body-level `429` is retried and a body-level 5xx on a send is
+//! [`Error::Ambiguous`], exactly like the same answer coming from the HTTP
+//! status.
+//!
+//! ```
+//! use serde_json::{json, Value};
+//! use telegram_api_client::{Error, MockTransport, Result, TelegramClient, Transport};
+//!
+//! /// Hands the decoded body back without judging it, like a raw HTTP client.
+//! #[derive(Clone)]
+//! struct RawEnvelope;
+//!
+//! impl Transport for RawEnvelope {
+//!     fn post_json(
+//!         &self,
+//!         _url: &str,
+//!         _body: &Value,
+//!     ) -> impl std::future::Future<Output = Result<Value>> {
+//!         std::future::ready(Ok(json!({
+//!             "ok": false,
+//!             "error_code": 429,
+//!             "description": "Too Many Requests: retry after 2",
+//!             "parameters": { "retry_after": 2 }
+//!         })))
+//!     }
+//! }
+//!
+//! # async fn demo() -> Result<()> {
+//! let client = TelegramClient::new("123:ABC", RawEnvelope).without_retry();
+//! let error = client.me().await.unwrap_err();
+//! assert!(matches!(error, Error::RateLimited { code: 429, .. }), "{error:?}");
+//! assert_eq!(error.retry_after(), Some(std::time::Duration::from_secs(2)));
+//! # let _ = TelegramClient::new("123:ABC", MockTransport::new());
+//! # Ok(()) }
+//! ```
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -33,11 +71,43 @@ use crate::update::User;
 use crate::update::{Chat, Message, Update};
 use crate::webhook_api::{DeleteWebhook, SetWebhook, WebhookInfo};
 
-/// Pulls `result` out of an envelope and deserializes it.
-fn take_result<D: DeserializeOwned>(method: &str, response: &serde_json::Value) -> Result<D> {
-    if let Some(error) = Error::from_api_body(response, None) {
-        return Err(error);
+/// Rejects an envelope that reports a Bot API failure.
+///
+/// A [`Transport`] is only obliged to deliver the bytes it received; whether the
+/// body says `ok: false` is none of its business. That judgement belongs here,
+/// inside the retry loop, so the two ways a failure can arrive — an `Err` from
+/// the transport and a failing envelope handed back as `Ok` — are classified
+/// identically for the method that was called.
+fn checked_envelope(method: &str, response: serde_json::Value) -> Result<serde_json::Value> {
+    match Error::from_api_body(&response, None) {
+        Some(error) => Err(error.classify_for(method)),
+        None => Ok(response),
     }
+}
+
+/// Reclassifies an answer that arrived but cannot be used.
+///
+/// The Bot API answered and the request was processed, so a `result` this crate
+/// cannot read is *not* "the request never happened". For a state-changing
+/// method the effect may already be visible — a message sent, an edit applied —
+/// and a caller that sees a decoding error is likely to send it again, which is
+/// exactly the duplicate this crate refuses to create. Such a failure is
+/// therefore [`Error::Ambiguous`], with the precise decoding error kept as its
+/// source. A `get*` method keeps the decoding error itself: nothing changed, and
+/// repeating the call is free.
+fn lost_answer(method: &str, error: Error) -> Error {
+    if crate::retry::is_idempotent(method) {
+        return error;
+    }
+    Error::Ambiguous {
+        method: method.to_string(),
+        detail: format!("the Bot API answered, but the answer could not be used: {error}"),
+        source: Some(Box::new(error)),
+    }
+}
+
+/// Pulls `result` out of an already-checked envelope and deserializes it.
+fn decode_result<D: DeserializeOwned>(method: &str, response: &serde_json::Value) -> Result<D> {
     let result = response
         .get("result")
         .cloned()
@@ -51,6 +121,12 @@ fn take_result<D: DeserializeOwned>(method: &str, response: &serde_json::Value) 
     })
 }
 
+/// Pulls `result` out of a successful envelope and deserializes it, keeping the
+/// fact that the request was already processed.
+fn take_result<D: DeserializeOwned>(method: &str, response: &serde_json::Value) -> Result<D> {
+    decode_result(method, response).map_err(|error| lost_answer(method, error))
+}
+
 /// Generates a thin client method: validate, post, decode.
 macro_rules! api_method {
     (
@@ -62,7 +138,12 @@ macro_rules! api_method {
         /// # Errors
         ///
         /// [`Error::InvalidRequest`] when the request does not validate, plus
-        /// transport, rate-limit and decoding failures from the Bot API.
+        /// transport and Bot API failures. Classification is per method: a 429
+        /// and a pre-write connection failure are retried, a 5xx on a
+        /// state-changing method is [`Error::Ambiguous`] and never retried, and
+        /// an answer that arrives but cannot be decoded is
+        /// [`Error::Ambiguous`] for those methods too — the call may have
+        /// happened even though its result was lost.
         pub async fn $name(&self, request: &$request) -> Result<$response> {
             request.validate()?;
             let response = self.call($method, request).await?;
@@ -85,9 +166,10 @@ macro_rules! media_method {
         /// # Errors
         ///
         /// [`Error::InvalidRequest`] when the request or the file does not
-        /// validate, plus transport, rate-limit and decoding failures. A 5xx is
-        /// reported as [`Error::Ambiguous`] and never retried — the upload may
-        /// have been accepted.
+        /// validate, plus transport and Bot API failures. A 5xx is reported as
+        /// [`Error::Ambiguous`] and never retried — the upload may have been
+        /// accepted — and so is an answer that cannot be decoded: the media may
+        /// be there even though the `result` was not readable.
         pub async fn $name(&self, request: &$request) -> Result<$response> {
             request.validate()?;
             let form = request.multipart_form();
@@ -180,8 +262,10 @@ impl<T: Transport> TelegramClient<T> {
     ///
     /// The budget only ever applies to failures that are safe to repeat: a 429
     /// (honouring `retry_after`) and a connection failure before the request was
-    /// written. A 5xx on a state-changing method is
-    /// [`Error::Ambiguous`] and is returned immediately, whatever the budget.
+    /// written. A 429 counts whichever shape it arrives in — an error from the
+    /// transport, or an `{"ok": false}` body handed back as a successful round
+    /// trip. A 5xx on a state-changing method is [`Error::Ambiguous`] and is
+    /// returned immediately, whatever the budget.
     ///
     /// ```rust
     /// use std::time::Duration;
@@ -401,9 +485,12 @@ impl<T: Transport> TelegramClient<T> {
 
     /// The one place that decides whether a failure may be repeated.
     ///
-    /// Every error is classified for its method first, so a 5xx on a send turns
-    /// into [`Error::Ambiguous`] before the retry decision is taken. That is what
-    /// keeps a non-idempotent request from ever being retried after a 5xx.
+    /// Every failure is classified for its method first, whichever shape it
+    /// arrives in: an error the transport raised, or a body that says
+    /// `ok: false` after a successful round trip. That is what keeps a
+    /// non-idempotent request from ever being retried after a 5xx — and what
+    /// makes a body-level 429 retryable instead of a terminal error the caller
+    /// sees only after the retry loop has already given up.
     async fn post(&self, method: &str, payload: &Payload<'_>) -> Result<serde_json::Value> {
         let url = self.method_url(method);
         let mut attempt = 0_u32;
@@ -413,7 +500,8 @@ impl<T: Transport> TelegramClient<T> {
                 Payload::Json(body) => self.transport.post_json(&url, body).await,
                 Payload::Multipart(form) => self.transport.post_multipart(&url, form).await,
             }
-            .map_err(|error| error.classify_for(method));
+            .map_err(|error| error.classify_for(method))
+            .and_then(|response| checked_envelope(method, response));
 
             match outcome {
                 Ok(response) => return Ok(response),

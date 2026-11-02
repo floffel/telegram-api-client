@@ -26,6 +26,24 @@ means for this API is spelled out in the README under
 
 ### Fixed
 
+- **A body-level error is classified inside the retry loop** (#29). `post` used
+  to hand back any `Ok` envelope and let `take_result` build the error
+  afterwards, so a transport that delivers the decoded `{"ok": false, ...}` body
+  instead of raising it bypassed every rule the crate has for retries: a 429 body
+  was never retried, a 5xx body on a send stayed a *retryable* `Api` error
+  instead of `Ambiguous`, and an unreadable `result` was reported as
+  `Payload`/`Unexpected` — "the request failed" — even though the bot had already
+  processed it and a caller's retry would duplicate the message. The envelope is
+  now checked on every attempt inside the loop and classified with
+  `classify_for(method)`, so both shapes of failure behave identically: 429 and
+  pre-write failures are retried (honouring `retry_after` and `max_delay`), a 5xx
+  on a state-changing method is `Ambiguous` and costs exactly one call, and a
+  `get*` 5xx is retried. A `result` that is missing or does not decode is
+  `Ambiguous` for a state-changing method, with the precise `Unexpected`/`Payload`
+  error — and its `serde_json` cause — kept as the source; a `get*` method keeps
+  the decoding error itself, since nothing changed and repeating the call is
+  free. `Transport` implementations may therefore stay dumb: returning the body
+  unjudged is now as safe as calling `Error::from_api_body` themselves.
 - **A `getChatMember` result missing `status` or `user` is a decode error** (#26).
   Both members are mandatory in the Bot API, but `ChatMember` marked them
   `serde(default)`, so a truncated or malformed payload decoded into a member
