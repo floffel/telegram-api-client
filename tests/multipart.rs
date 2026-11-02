@@ -3,12 +3,20 @@
 
 use serde_json::json;
 use telegram_api_client::{
-    EditMessageMedia, Error, InputMedia, MockReply, MockTransport, SendDocument, SendMediaGroup,
-    SendPhoto, TelegramClient, UploadFile, MAX_UPLOAD_BYTES,
+    EditMessageMedia, Error, InputMedia, InputMediaKind, MockReply, MockTransport, SendDocument,
+    SendMediaGroup, SendPhoto, TelegramClient, UploadFile, MAX_UPLOAD_BYTES,
 };
 
 const TOKEN: &str = "123:ABC";
 const CHAT: i64 = -1001;
+
+/// The `field` and `reason` of an `InvalidRequest`, panicking on anything else.
+fn invalid_request(result: telegram_api_client::Result<()>) -> (String, String) {
+    match result {
+        Err(Error::InvalidRequest { field, reason }) => (field.to_string(), reason),
+        other => panic!("expected InvalidRequest, got {other:?}"),
+    }
+}
 
 fn message() -> serde_json::Value {
     json!({
@@ -438,5 +446,197 @@ fn a_file_payload_arrives_byte_for_byte() {
     assert!(
         body.windows(needle.len()).any(|window| window == needle),
         "payload missing from the encoded body (boundary {boundary})"
+    );
+}
+
+// ---- a reference and an upload are two halves of one field (#35) ----------
+
+/// A PNG payload, so the MIME family check never masks the reference rule.
+fn png() -> UploadFile {
+    UploadFile::new("a.png", vec![0x89, 0x50, 0x4e, 0x47])
+}
+
+#[test]
+fn an_empty_reference_is_accepted_when_the_bytes_are_attached() {
+    // `with_upload` writes a placeholder of its own, so the bare case the audit
+    // found is the one a caller can still build by hand: public fields, no
+    // string, bytes attached.
+    let bare = SendPhoto {
+        chat_id: CHAT.into(),
+        photo: String::new(),
+        upload: Some(png()),
+        ..SendPhoto::default()
+    };
+    assert!(
+        bare.validate().is_ok(),
+        "the reference is replaced by the part"
+    );
+
+    let photo = SendPhoto::new(CHAT, "").with_upload(png());
+    assert!(photo.validate().is_ok());
+    assert!(
+        photo.multipart_form().is_some(),
+        "uploaded requests never go out as JSON"
+    );
+
+    // The same shape one level in: a media item without a reference string.
+    let item = InputMedia {
+        media: String::new(),
+        upload: Some(png()),
+        ..InputMedia::photo("")
+    };
+    let edit = EditMessageMedia::new(CHAT, 7, item.clone());
+    assert!(edit.validate().is_ok());
+
+    let album = SendMediaGroup::new(CHAT, vec![item, InputMedia::photo("AgACAgI")]);
+    assert!(album.validate().is_ok());
+
+    // A placeholder the crate itself writes is the same case.
+    let written = InputMedia::photo("ignored").with_upload(png());
+    assert_eq!(written.media, "attach://media");
+    assert!(
+        SendMediaGroup::new(CHAT, vec![written, InputMedia::photo("AgACAgI")])
+            .validate()
+            .is_ok()
+    );
+}
+
+#[test]
+fn an_empty_reference_is_rejected_when_no_bytes_are_attached() {
+    let (field, reason) = invalid_request(SendPhoto::new(CHAT, "").validate());
+    assert_eq!(field, "photo");
+    assert!(reason.contains("empty"), "{reason}");
+
+    // Whitespace is empty too: the trimmed value is what Telegram resolves.
+    let (field, _) = invalid_request(SendPhoto::new(CHAT, " \t\n").validate());
+    assert_eq!(field, "photo");
+
+    let (field, _) =
+        invalid_request(EditMessageMedia::new(CHAT, 7, InputMedia::photo("")).validate());
+    assert_eq!(field, "media");
+
+    let album = SendMediaGroup::new(
+        CHAT,
+        vec![InputMedia::photo("AgACAgI"), InputMedia::photo("")],
+    );
+    let (field, _) = invalid_request(album.validate());
+    assert_eq!(field, "media");
+}
+
+#[test]
+fn an_attach_placeholder_is_rejected_when_no_bytes_are_attached() {
+    // Telegram would receive `attach://file0` with no part named `file0`.
+    let (field, reason) = invalid_request(SendPhoto::new(CHAT, "attach://file0").validate());
+    assert_eq!(field, "photo");
+    assert!(reason.contains("attach://"), "{reason}");
+
+    let (field, reason) = invalid_request(
+        EditMessageMedia::new(CHAT, 7, InputMedia::video("attach://file0")).validate(),
+    );
+    assert_eq!(field, "media");
+    assert!(reason.contains("attach://"), "{reason}");
+
+    let album = SendMediaGroup::new(
+        CHAT,
+        vec![
+            InputMedia::photo("attach://file0"),
+            InputMedia::photo("AgACAgI"),
+        ],
+    );
+    let (field, _) = invalid_request(album.validate());
+    assert_eq!(field, "media");
+
+    // An unknown kind is not exempt: the rule is about the wire, not the type.
+    let unknown = SendMediaGroup::new(
+        CHAT,
+        vec![
+            InputMedia::new(InputMediaKind::from("hologram"), "attach://file0"),
+            InputMedia::photo("AgACAgI"),
+        ],
+    );
+    assert!(unknown.validate().is_err());
+}
+
+#[test]
+fn an_attach_placeholder_is_ignored_when_the_bytes_are_attached() {
+    // Edit: the crate's own part name wins over whatever the caller wrote.
+    let edit = EditMessageMedia::new(
+        CHAT,
+        7,
+        InputMedia::photo("attach://file9").with_upload(png()),
+    );
+    assert!(edit.validate().is_ok());
+    let form = edit.multipart_form().expect("multipart form");
+    assert_eq!(form.files()[0].field, "file0");
+    assert!(
+        form.json_fields()["media"]
+            .as_str()
+            .expect("media json")
+            .contains("attach://file0"),
+        "the caller's placeholder is rewritten"
+    );
+
+    // Album: same, with the index of the item as the part name.
+    let album = SendMediaGroup::new(
+        CHAT,
+        vec![
+            InputMedia::photo("AgACAgI"),
+            InputMedia::photo("attach://file7").with_upload(png()),
+        ],
+    );
+    assert!(album.validate().is_ok());
+    let form = album.multipart_form().expect("multipart form");
+    assert_eq!(form.files()[0].field, "file1");
+    assert!(form.json_fields()["media"]
+        .as_str()
+        .expect("media json")
+        .contains("attach://file1"));
+}
+
+#[test]
+fn the_attach_prefix_is_matched_at_the_start_and_without_regard_to_case() {
+    // Both sides of the prefix boundary, and both letter cases.
+    for rejected in [
+        "ATTACH://file0",
+        "Attach://file0",
+        "attach://",
+        "  attach://file0",
+    ] {
+        assert!(
+            SendPhoto::new(CHAT, rejected).validate().is_err(),
+            "`{rejected}` points at a part that does not exist"
+        );
+    }
+    for accepted in [
+        "attach:/file0",   // one slash short: not the prefix
+        "attach:file0",    // the scheme alone
+        "xattach://file0", // not at the start
+        "https://example.com/a.png",
+        "AgACAgIAAxkBAAI",
+    ] {
+        assert!(
+            SendPhoto::new(CHAT, accepted).validate().is_ok(),
+            "`{accepted}` is a file_id or URL, not a placeholder"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_placeholder_without_an_upload_never_reaches_the_transport() {
+    let (client, transport) = client();
+    let edit = EditMessageMedia::new(CHAT, 7, InputMedia::photo("attach://file0"));
+
+    let error = client
+        .edit_message_media(&edit)
+        .await
+        .expect_err("rejected locally");
+    assert!(matches!(
+        error,
+        Error::InvalidRequest { field: "media", .. }
+    ));
+    assert_eq!(
+        transport.calls().len(),
+        0,
+        "no HTTP call for a dead reference"
     );
 }
