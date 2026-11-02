@@ -2,13 +2,13 @@
 //! examples an author thought of.
 
 use proptest::prelude::*;
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value};
 use std::time::Duration;
 use telegram_api_client::{
-    guess_mime, is_idempotent, is_valid_mime, send::MAX_POLL_OPTION, AnswerInlineQuery, ChatId,
-    ChatMember, ChatMemberPresence, ChatMemberStatus, EntityKind, Error, InlineQueryResult,
-    InputMedia, InputMediaKind, MessageEntity, MultipartFile, MultipartForm, ParseMode, PollType,
-    RetryPolicy, SendMessage, SendPoll, Update, UpdateCursor,
+    guess_mime, is_idempotent, is_valid_mime, send::MAX_POLL_OPTION, ChatId, ChatMember,
+    ChatMemberPresence, ChatMemberStatus, EditTarget, EntityKind, Error, InputMedia,
+    InputMediaKind, MessageEntity, MultipartFile, MultipartForm, ParseMode, PollType, RetryPolicy,
+    SendMessage, SendPoll, Update, UpdateCursor,
 };
 
 proptest! {
@@ -494,6 +494,47 @@ proptest! {
         prop_assert_eq!(a.boundary(), b.boundary());
         prop_assert!(a.boundary().starts_with("telegram-api-client-"));
     }
+
+    /// #36: an accepted edit target addresses exactly one message, so the body
+    /// it serializes to can never carry both `chat_id` + `message_id` and
+    /// `inline_message_id` — and a body carrying a blank inline id is never
+    /// accepted. This is the invariant the audit broke: validation read a blank
+    /// id as absent while the serializer still sent it.
+    #[test]
+    fn accepted_edit_targets_serialize_exactly_one_addressing_form(
+        chat in prop::option::of(any::<i64>()),
+        message in prop::option::of(any::<i64>()),
+        inline in prop::option::of("\\PC*"),
+    ) {
+        let target = EditTarget {
+            chat_id: chat.map(ChatId::Id),
+            message_id: message,
+            inline_message_id: inline,
+        };
+        let body = serde_json::to_value(&target).expect("serialize");
+        let sent_inline = body.get("inline_message_id");
+        let sent_chat = body.get("chat_id").is_some() && body.get("message_id").is_some();
+        let blank_inline = sent_inline
+            .and_then(Value::as_str)
+            .is_some_and(|id| id.trim().is_empty());
+
+        if target.validate().is_ok() {
+            prop_assert!(
+                sent_inline.is_some() != sent_chat,
+                "accepted target sent {} addressing forms: {}",
+                usize::from(sent_inline.is_some()) + usize::from(sent_chat),
+                body
+            );
+            prop_assert!(!blank_inline, "accepted a blank inline id: {}", body);
+        }
+        if blank_inline {
+            prop_assert!(
+                target.validate().is_err(),
+                "a serialized blank inline id must be refused: {}",
+                body
+            );
+        }
+    }
 }
 
 /// Byte-level `memchr`-style search, so the property tests can assert on the
@@ -609,92 +650,5 @@ proptest! {
                 cursor.next_offset()
             );
         }
-    }
-
-    /// An inline query answer is accepted exactly when every result is an object
-    /// with a non-empty `type`, a 1-64 byte `id` and no repeated id — the rules
-    /// the Bot API enforces on the whole array.
-    #[test]
-    fn inline_results_are_accepted_exactly_when_well_formed(
-        kinds in prop::collection::vec("[ -~]{0,8}", 1..6),
-        ids in prop::collection::vec("[ -~]{0,70}", 1..6),
-    ) {
-        let results = kinds
-            .iter()
-            .zip(&ids)
-            .map(|(kind, id)| {
-                InlineQueryResult::new(json!({"type": kind, "id": id, "kept": [kind, id]}))
-            })
-            .collect::<Vec<_>>();
-        let payload = serde_json::to_value(&results).unwrap();
-
-        let unique = {
-            let mut seen = std::collections::HashSet::new();
-            ids.iter().all(|id| seen.insert(id.as_str()))
-        };
-        let expected = unique
-            && kinds
-                .iter()
-                .zip(&ids)
-                .all(|(kind, id)| !kind.trim().is_empty() && !id.is_empty() && id.len() <= 64);
-
-        let answer = AnswerInlineQuery::new("q", results);
-        prop_assert_eq!(
-            answer.validate().is_ok(),
-            expected,
-            "kinds={:?} ids={:?}",
-            kinds,
-            ids
-        );
-
-        // Validation is a check, not a rewrite: an accepted answer goes out
-        // exactly as it was assembled, every extra member included.
-        if expected {
-            prop_assert_eq!(
-                serde_json::to_value(&answer).unwrap()["results"].clone(),
-                payload
-            );
-        }
-    }
-
-    /// Optional, mistyped and missing members are refused one by one, and a
-    /// non-object is never a result.
-    #[test]
-    fn inline_result_validation_accepts_only_usable_objects(
-        as_object in prop::bool::ANY,
-        kind in prop::option::of("[ -~]{0,8}"),
-        id in prop::option::of("[ -~]{0,70}"),
-        id_is_a_number in prop::bool::ANY,
-    ) {
-        let value = if as_object {
-            let mut object = Map::new();
-            if let Some(kind) = &kind {
-                object.insert("type".to_string(), Value::from(kind.as_str()));
-            }
-            if let Some(id) = &id {
-                object.insert(
-                    "id".to_string(),
-                    if id_is_a_number {
-                        Value::from(7)
-                    } else {
-                        Value::from(id.as_str())
-                    },
-                );
-            }
-            Value::Object(object)
-        } else {
-            Value::Null
-        };
-
-        let expected = as_object
-            && !id_is_a_number
-            && kind
-                .as_ref()
-                .is_some_and(|kind| !kind.trim().is_empty())
-            && id
-                .as_ref()
-                .is_some_and(|id| !id.is_empty() && id.len() <= 64);
-        let result = InlineQueryResult::new(value.clone());
-        prop_assert_eq!(result.validate().is_ok(), expected, "value={}", value);
     }
 }

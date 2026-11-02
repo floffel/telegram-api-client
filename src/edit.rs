@@ -12,6 +12,22 @@ use crate::types::{ChatId, InputMedia, LinkPreviewOptions, MessageEntity, ParseM
 
 /// Identifies the message an edit applies to: either `chat_id` + `message_id`,
 /// or the id of an inline message.
+///
+/// The two forms are exclusive. An `inline_message_id` that is set at all —
+/// including a blank one — counts as the inline form, so a caller cannot end up
+/// with a body that carries both addressing forms.
+///
+/// ```
+/// use telegram_api_client::EditTarget;
+///
+/// let in_chat = EditTarget::chat(-1001, 7);
+/// assert_eq!(in_chat.message_id, Some(7));
+/// assert!(in_chat.validate().is_ok());
+///
+/// let inline = EditTarget::inline("inline-1");
+/// assert_eq!(inline.inline_message_id.as_deref(), Some("inline-1"));
+/// assert!(inline.validate().is_ok());
+/// ```
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
 pub struct EditTarget {
     /// Chat containing the message.
@@ -27,6 +43,15 @@ pub struct EditTarget {
 
 impl EditTarget {
     /// A message in a chat.
+    ///
+    /// ```
+    /// use telegram_api_client::{ChatId, EditTarget};
+    ///
+    /// let target = EditTarget::chat(-1001, 7);
+    /// assert_eq!(target.chat_id, Some(ChatId::Id(-1001)));
+    /// assert_eq!(target.message_id, Some(7));
+    /// assert_eq!(target.inline_message_id, None);
+    /// ```
     #[must_use]
     pub fn chat(chat_id: impl Into<ChatId>, message_id: i64) -> Self {
         Self {
@@ -37,6 +62,15 @@ impl EditTarget {
     }
 
     /// An inline message.
+    ///
+    /// ```
+    /// use telegram_api_client::EditTarget;
+    ///
+    /// let target = EditTarget::inline("inline-1");
+    /// assert_eq!(target.inline_message_id.as_deref(), Some("inline-1"));
+    /// assert_eq!(target.chat_id, None);
+    /// assert_eq!(target.message_id, None);
+    /// ```
     #[must_use]
     pub fn inline(inline_message_id: impl Into<String>) -> Self {
         Self {
@@ -49,18 +83,61 @@ impl EditTarget {
     /// Exactly one addressing form must be present, and a chat id needs a
     /// message id.
     ///
+    /// A set `inline_message_id` is the inline form even when it is blank: the
+    /// field is serialized whenever it is `Some`, so a blank value is rejected
+    /// instead of being read as "inline message id absent". Otherwise an edit
+    /// built for a chat but carrying a blank inline id would validate as a chat
+    /// edit and still put both addressing forms on the wire.
+    ///
     /// # Errors
     ///
-    /// [`Error::InvalidRequest`] when both forms are given, when neither is,
-    /// when only one half of `chat_id`/`message_id` is set, or when the
-    /// message id is not positive.
+    /// [`Error::InvalidRequest`] when `inline_message_id` is set but blank,
+    /// when both forms are given, when neither is, when only one half of
+    /// `chat_id`/`message_id` is set, or when the message id is not positive.
+    ///
+    /// ```
+    /// use telegram_api_client::{EditTarget, Error};
+    ///
+    /// // One form, complete: accepted.
+    /// assert!(EditTarget::chat(-1001, 7).validate().is_ok());
+    /// assert!(EditTarget::inline("inline-1").validate().is_ok());
+    ///
+    /// // Both forms at once: refused, not "chat wins".
+    /// let mut both = EditTarget::chat(-1001, 7);
+    /// both.inline_message_id = Some("inline-1".to_string());
+    /// assert!(both.validate().is_err());
+    ///
+    /// // A blank inline id is present, so it is refused rather than ignored.
+    /// let mut blank = EditTarget::chat(-1001, 7);
+    /// blank.inline_message_id = Some("  ".to_string());
+    /// assert!(matches!(
+    ///     blank.validate(),
+    ///     Err(Error::InvalidRequest {
+    ///         field: "inline_message_id",
+    ///         ..
+    ///     })
+    /// ));
+    ///
+    /// // Neither form.
+    /// assert!(EditTarget::default().validate().is_err());
+    /// ```
     pub fn validate(&self) -> Result<()> {
-        let inline = self
-            .inline_message_id
-            .as_deref()
-            .is_some_and(|id| !id.trim().is_empty());
+        // `Some` is the inline form, blank or not: serialization sends every
+        // `Some`, so reading a blank id as absent would let a chat edit carry
+        // both addressing forms.
+        let inline = self.inline_message_id.is_some();
         let chat = self.chat_id.is_some() || self.message_id.is_some();
 
+        if self
+            .inline_message_id
+            .as_deref()
+            .is_some_and(|id| id.trim().is_empty())
+        {
+            return Err(Error::InvalidRequest {
+                field: "inline_message_id",
+                reason: "must not be empty".to_string(),
+            });
+        }
         if inline && chat {
             return Err(Error::InvalidRequest {
                 field: "inline_message_id",
