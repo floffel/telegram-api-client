@@ -3,8 +3,9 @@
 
 use serde_json::json;
 use telegram_api_client::{
-    EditMessageMedia, Error, InputMedia, InputMediaKind, MockReply, MockTransport, SendDocument,
-    SendMediaGroup, SendPhoto, TelegramClient, UploadFile, MAX_UPLOAD_BYTES,
+    EditMessageMedia, Error, InputMedia, InputMediaKind, MockReply, MockTransport, SendAnimation,
+    SendAudio, SendDocument, SendMediaGroup, SendPhoto, SendVideo, SendVoice, TelegramClient,
+    UploadFile, MAX_UPLOAD_BYTES,
 };
 
 const TOKEN: &str = "123:ABC";
@@ -451,35 +452,48 @@ fn a_file_payload_arrives_byte_for_byte() {
 
 // ---- a reference and an upload are two halves of one field (#35) ----------
 
-/// A PNG payload, so the MIME family check never masks the reference rule.
+/// A payload of the given family, so the upload check never masks this rule.
+fn upload(mime: &str) -> UploadFile {
+    UploadFile::new("a.bin", vec![1]).with_mime(mime)
+}
+
 fn png() -> UploadFile {
-    UploadFile::new("a.png", vec![0x89, 0x50, 0x4e, 0x47])
+    upload("image/png")
 }
 
 #[test]
 fn an_empty_reference_is_accepted_when_the_bytes_are_attached() {
-    // `with_upload` writes a placeholder of its own, so the bare case the audit
-    // found is the one a caller can still build by hand: public fields, no
-    // string, bytes attached.
-    let bare = SendPhoto {
-        chat_id: CHAT.into(),
-        photo: String::new(),
-        upload: Some(png()),
-        ..SendPhoto::default()
-    };
-    assert!(
-        bare.validate().is_ok(),
-        "the reference is replaced by the part"
-    );
+    // Struct literals preserve the bare case the audit found: public fields, no
+    // reference string, bytes attached. `with_upload` then covers the builder
+    // path separately.
+    macro_rules! assert_send {
+        ($request:ident, $field:ident, $mime:literal) => {{
+            let bare = $request {
+                chat_id: CHAT.into(),
+                $field: String::new(),
+                upload: Some(upload($mime)),
+                ..$request::default()
+            };
+            assert!(
+                bare.validate().is_ok(),
+                "{} replaces the empty reference",
+                stringify!($field)
+            );
 
-    let photo = SendPhoto::new(CHAT, "").with_upload(png());
-    assert!(photo.validate().is_ok());
-    assert!(
-        photo.multipart_form().is_some(),
-        "uploaded requests never go out as JSON"
-    );
+            let built = $request::new(CHAT, "").with_upload(upload($mime));
+            assert!(built.validate().is_ok(), "{}", stringify!($field));
+            assert!(built.multipart_form().is_ok_and(|form| form.is_some()));
+        }};
+    }
 
-    // The same shape one level in: a media item without a reference string.
+    assert_send!(SendPhoto, photo, "image/png");
+    assert_send!(SendDocument, document, "application/pdf");
+    assert_send!(SendAudio, audio, "audio/mpeg");
+    assert_send!(SendVideo, video, "video/mp4");
+    assert_send!(SendAnimation, animation, "image/gif");
+    assert_send!(SendVoice, voice, "audio/ogg");
+
+    // The same shape one level in: an item without a reference string.
     let item = InputMedia {
         media: String::new(),
         upload: Some(png()),
@@ -503,13 +517,24 @@ fn an_empty_reference_is_accepted_when_the_bytes_are_attached() {
 
 #[test]
 fn an_empty_reference_is_rejected_when_no_bytes_are_attached() {
-    let (field, reason) = invalid_request(SendPhoto::new(CHAT, "").validate());
-    assert_eq!(field, "photo");
-    assert!(reason.contains("empty"), "{reason}");
+    macro_rules! assert_send {
+        ($request:ident, $field:literal) => {{
+            let (field, reason) = invalid_request($request::new(CHAT, "").validate());
+            assert_eq!(field, $field);
+            assert!(reason.contains("empty"), "{reason}");
 
-    // Whitespace is empty too: the trimmed value is what Telegram resolves.
-    let (field, _) = invalid_request(SendPhoto::new(CHAT, " \t\n").validate());
-    assert_eq!(field, "photo");
+            // Whitespace is empty too: the trimmed value is what Telegram resolves.
+            let (field, _) = invalid_request($request::new(CHAT, " \t\n").validate());
+            assert_eq!(field, $field);
+        }};
+    }
+
+    assert_send!(SendPhoto, "photo");
+    assert_send!(SendDocument, "document");
+    assert_send!(SendAudio, "audio");
+    assert_send!(SendVideo, "video");
+    assert_send!(SendAnimation, "animation");
+    assert_send!(SendVoice, "voice");
 
     let (field, _) =
         invalid_request(EditMessageMedia::new(CHAT, 7, InputMedia::photo("")).validate());
@@ -525,10 +550,21 @@ fn an_empty_reference_is_rejected_when_no_bytes_are_attached() {
 
 #[test]
 fn an_attach_placeholder_is_rejected_when_no_bytes_are_attached() {
-    // Telegram would receive `attach://file0` with no part named `file0`.
-    let (field, reason) = invalid_request(SendPhoto::new(CHAT, "attach://file0").validate());
-    assert_eq!(field, "photo");
-    assert!(reason.contains("attach://"), "{reason}");
+    macro_rules! assert_send {
+        ($request:ident, $field:literal) => {{
+            // Telegram would receive `attach://file0` with no part named `file0`.
+            let (field, reason) = invalid_request($request::new(CHAT, "attach://file0").validate());
+            assert_eq!(field, $field);
+            assert!(reason.contains("attach://"), "{reason}");
+        }};
+    }
+
+    assert_send!(SendPhoto, "photo");
+    assert_send!(SendDocument, "document");
+    assert_send!(SendAudio, "audio");
+    assert_send!(SendVideo, "video");
+    assert_send!(SendAnimation, "animation");
+    assert_send!(SendVoice, "voice");
 
     let (field, reason) = invalid_request(
         EditMessageMedia::new(CHAT, 7, InputMedia::video("attach://file0")).validate(),
@@ -566,7 +602,10 @@ fn an_attach_placeholder_is_ignored_when_the_bytes_are_attached() {
         InputMedia::photo("attach://file9").with_upload(png()),
     );
     assert!(edit.validate().is_ok());
-    let form = edit.multipart_form().expect("multipart form");
+    let form = edit
+        .multipart_form()
+        .expect("serialize form")
+        .expect("multipart form");
     assert_eq!(form.files()[0].field, "file0");
     assert!(
         form.json_fields()["media"]
@@ -585,7 +624,10 @@ fn an_attach_placeholder_is_ignored_when_the_bytes_are_attached() {
         ],
     );
     assert!(album.validate().is_ok());
-    let form = album.multipart_form().expect("multipart form");
+    let form = album
+        .multipart_form()
+        .expect("serialize form")
+        .expect("multipart form");
     assert_eq!(form.files()[0].field, "file1");
     assert!(form.json_fields()["media"]
         .as_str()

@@ -5,8 +5,8 @@ use serde_json::Value;
 
 use crate::error::{Error, Result};
 use crate::send::{
-    serialized_multipart_object, text_field, validate_chat, validate_entities, validate_text,
-    validate_media_reference, validate_thread, MAX_CAPTION, MAX_MESSAGE_TEXT,
+    serialized_multipart_object, text_field, validate_chat, validate_entities,
+    validate_media_reference, validate_text, validate_thread, MAX_CAPTION, MAX_MESSAGE_TEXT,
 };
 use crate::transport::MultipartForm;
 use crate::types::{ChatId, InputMedia, LinkPreviewOptions, MessageEntity, ParseMode, ReplyMarkup};
