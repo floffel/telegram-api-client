@@ -465,10 +465,9 @@ fn chat_member_presence_is_exposed() {
     assert_eq!(member.presence(), ChatMemberPresence::Unknown);
     assert!(!member.is_present());
 
-    member = ChatMember::Restricted(telegram_api_client::ChatMemberRestricted {
-        is_member: Some(false),
-        ..telegram_api_client::ChatMemberRestricted::default()
-    });
+    let mut restricted = telegram_api_client::ChatMemberRestricted::default();
+    restricted.is_member = Some(false);
+    member = ChatMember::Restricted(restricted);
     assert_eq!(member.is_member(), Some(false));
     assert_eq!(member.presence(), ChatMemberPresence::Absent);
 
@@ -755,14 +754,10 @@ fn chat_member_accessors_cover_every_shape() {
     assert!(!banned.is_present());
 
     // The payload structs are public: a caller builds the one it needs.
-    let built = ChatMember::Creator(telegram_api_client::ChatMemberOwner {
-        user: User {
-            id: 9,
-            ..User::default()
-        },
-        custom_title: Some("Owner".to_string()),
-        ..telegram_api_client::ChatMemberOwner::default()
-    });
+    let mut owner = telegram_api_client::ChatMemberOwner::default();
+    owner.user.id = 9;
+    owner.custom_title = Some("Owner".to_string());
+    let built = ChatMember::Creator(owner);
     assert_eq!(built.custom_title(), Some("Owner"));
     assert!(built.is_present());
 
@@ -774,9 +769,10 @@ fn chat_member_accessors_cover_every_shape() {
     extra.insert("haunting_since".to_string(), json!(5));
     let ghost = ChatMember::Unknown {
         status: ChatMemberStatus::Unknown("ghost".to_string()),
-        user: User {
-            id: 3,
-            ..User::default()
+        user: {
+            let mut user = User::default();
+            user.id = 3;
+            user
         },
         extra,
     };
@@ -790,14 +786,10 @@ fn chat_member_accessors_cover_every_shape() {
     let mut extra = Map::new();
     extra.insert("status".to_string(), json!("member"));
     extra.insert("user".to_string(), json!({"id": 99}));
-    let disguised = ChatMember::Creator(telegram_api_client::ChatMemberOwner {
-        user: User {
-            id: 4,
-            ..User::default()
-        },
-        extra,
-        ..telegram_api_client::ChatMemberOwner::default()
-    });
+    let mut owner = telegram_api_client::ChatMemberOwner::default();
+    owner.user.id = 4;
+    owner.extra = extra;
+    let disguised = ChatMember::Creator(owner);
     let rendered = serde_json::to_value(&disguised).unwrap();
     assert_eq!(rendered["status"], "creator");
     assert_eq!(rendered["user"]["id"], 4);

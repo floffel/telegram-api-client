@@ -447,6 +447,7 @@ impl UnpinChatMessage {
 /// assert_eq!(owner.custom_title.as_deref(), Some("Boss"));
 /// ```
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ChatMemberOwner {
     /// The user who owns the chat.
     pub user: User,
@@ -482,6 +483,7 @@ pub struct ChatMemberOwner {
 /// ```
 #[allow(clippy::struct_excessive_bools)] // a permission set is booleans, by definition
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ChatMemberAdministrator {
     /// The administrator.
     pub user: User,
@@ -562,6 +564,7 @@ pub struct ChatMemberAdministrator {
 /// assert_eq!(member.until_date, None, "no subscription, no expiry");
 /// ```
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ChatMemberMember {
     /// The member.
     pub user: User,
@@ -589,10 +592,9 @@ pub struct ChatMemberMember {
 ///     ChatMember, ChatMemberPresence, ChatMemberRestricted, ChatMemberStatus,
 /// };
 ///
-/// let member = ChatMember::Restricted(ChatMemberRestricted {
-///     is_member: Some(false),
-///     ..ChatMemberRestricted::default()
-/// });
+/// let mut restricted = ChatMemberRestricted::default();
+/// restricted.is_member = Some(false);
+/// let member = ChatMember::Restricted(restricted);
 /// assert_eq!(member.presence(), ChatMemberPresence::Absent);
 ///
 /// let fresh = ChatMember::new(
@@ -635,6 +637,7 @@ pub enum ChatMemberPresence {
 /// ```
 #[allow(clippy::struct_excessive_bools)] // a permission set is booleans, by definition
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ChatMemberRestricted {
     /// The restricted user.
     pub user: User,
@@ -713,6 +716,7 @@ pub struct ChatMemberRestricted {
 /// assert_eq!(left.user.id, 1);
 /// ```
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ChatMemberLeft {
     /// The user, who may join again on their own.
     pub user: User,
@@ -731,6 +735,7 @@ pub struct ChatMemberLeft {
 /// assert_eq!(banned.until_date, 0, "0 means banned forever");
 /// ```
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ChatMemberBanned {
     /// The banned user.
     pub user: User,

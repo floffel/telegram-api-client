@@ -1,6 +1,6 @@
 //! Update parsing.
 
-use telegram_api_client::{Chat, Update};
+use telegram_api_client::Update;
 
 #[test]
 fn parses_group_message_with_sender() {
@@ -17,14 +17,8 @@ fn parses_group_message_with_sender() {
     let update: Update = serde_json::from_str(json).unwrap();
     assert_eq!(update.update_id, 100);
     let message = update.message.as_ref().unwrap();
-    assert_eq!(
-        message.chat,
-        Chat {
-            id: -1001,
-            chat_type: "supergroup".into(),
-            ..Chat::default()
-        }
-    );
+    assert_eq!(message.chat.id, -1001);
+    assert_eq!(message.chat.chat_type, "supergroup".into());
     assert_eq!(
         message.from.as_ref().unwrap().username.as_deref(),
         Some("flo")

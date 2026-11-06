@@ -67,10 +67,7 @@ async fn the_request_carries_the_cursor_offset_not_the_last_batch() {
         "a fresh cursor sends no offset"
     );
 
-    cursor.confirm(&[Update {
-        update_id: 11,
-        ..Update::default()
-    }]);
+    cursor.confirm(&[Update::new(11)]);
     poll(&client, &cursor, 25).await.expect("second poll");
     assert_eq!(
         offset_of(&transport, 1),
@@ -104,16 +101,7 @@ async fn an_empty_answer_does_not_move_the_watermark() {
 #[tokio::test]
 async fn a_gap_in_the_ids_advances_past_the_highest() {
     let mut cursor = UpdateCursor::new();
-    let delivered = cursor.confirm(&[
-        Update {
-            update_id: 1,
-            ..Update::default()
-        },
-        Update {
-            update_id: 3,
-            ..Update::default()
-        },
-    ]);
+    let delivered = cursor.confirm(&[Update::new(1), Update::new(3)]);
 
     assert_eq!(delivered.len(), 2);
     assert_eq!(
@@ -126,36 +114,14 @@ async fn a_gap_in_the_ids_advances_past_the_highest() {
 #[tokio::test]
 async fn a_descending_batch_is_sorted_and_never_walks_backwards() {
     let mut cursor = UpdateCursor::after(9);
-    let delivered = cursor.confirm(&[
-        Update {
-            update_id: 12,
-            ..Update::default()
-        },
-        Update {
-            update_id: 10,
-            ..Update::default()
-        },
-        Update {
-            update_id: 11,
-            ..Update::default()
-        },
-    ]);
+    let delivered = cursor.confirm(&[Update::new(12), Update::new(10), Update::new(11)]);
 
     let ids: Vec<i64> = delivered.iter().map(|update| update.update_id).collect();
     assert_eq!(ids, vec![10, 11, 12], "delivered in ascending order");
     assert_eq!(cursor.next_offset(), Some(13));
 
     // A replayed batch after the watermark was persisted yields nothing.
-    let replay = cursor.confirm(&[
-        Update {
-            update_id: 10,
-            ..Update::default()
-        },
-        Update {
-            update_id: 11,
-            ..Update::default()
-        },
-    ]);
+    let replay = cursor.confirm(&[Update::new(10), Update::new(11)]);
     assert_eq!(replay.len(), 0, "confirmed ids are never handed out twice");
     assert_eq!(
         cursor.next_offset(),
@@ -167,20 +133,7 @@ async fn a_descending_batch_is_sorted_and_never_walks_backwards() {
 #[tokio::test]
 async fn duplicates_inside_one_batch_are_collapsed() {
     let mut cursor = UpdateCursor::new();
-    let delivered = cursor.confirm(&[
-        Update {
-            update_id: 5,
-            ..Update::default()
-        },
-        Update {
-            update_id: 5,
-            ..Update::default()
-        },
-        Update {
-            update_id: 6,
-            ..Update::default()
-        },
-    ]);
+    let delivered = cursor.confirm(&[Update::new(5), Update::new(5), Update::new(6)]);
     assert_eq!(delivered.len(), 2);
     assert_eq!(cursor.next_offset(), Some(7));
 }

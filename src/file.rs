@@ -108,7 +108,8 @@ fn validate_file_id(file_id: &str, field: &'static str) -> std::result::Result<(
 /// assert_eq!(file.download_path(), Some("photos/a.jpg"));
 /// assert_eq!(file.file_size, Some(1024));
 /// ```
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct File {
     /// Identifier usable for downloads and re-sends.
     #[serde(alias = "fileId", deserialize_with = "deserialize_file_id")]
@@ -202,6 +203,26 @@ fn validate_file_path(path: &str, field: &'static str) -> std::result::Result<()
 }
 
 impl File {
+    /// An otherwise empty file handle with both required identifiers.
+    ///
+    /// Received objects are `#[non_exhaustive]`; use this constructor or
+    /// [`Default`](Self::default) and assign any optional members afterwards.
+    ///
+    /// ```
+    /// use telegram_api_client::File;
+    ///
+    /// let file = File::new("AgACAgI", "unique");
+    /// assert_eq!(file.file_id, "AgACAgI");
+    /// ```
+    #[must_use]
+    pub fn new(file_id: impl Into<String>, file_unique_id: impl Into<String>) -> Self {
+        Self {
+            file_id: file_id.into(),
+            file_unique_id: file_unique_id.into(),
+            ..Self::default()
+        }
+    }
+
     /// The relative path for the download URL, if Telegram provided one.
     ///
     /// Paths that are not a safe relative URL path are ignored.

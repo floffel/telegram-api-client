@@ -260,6 +260,7 @@ impl DeleteWebhook {
 /// assert!(!info.has_custom_certificate);
 /// ```
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct WebhookInfo {
     /// Current webhook URL; empty when none is set.
     #[serde(default, alias = "URL", alias = "webhookUrl")]
@@ -297,7 +298,8 @@ impl WebhookInfo {
     /// use telegram_api_client::WebhookInfo;
     ///
     /// assert!(!WebhookInfo::default().is_registered());
-    /// let info = WebhookInfo { url: "https://example.com/hook".into(), ..Default::default() };
+    /// let mut info = WebhookInfo::default();
+    /// info.url = "https://example.com/hook".into();
     /// assert!(info.is_registered());
     /// ```
     #[must_use]
@@ -310,7 +312,8 @@ impl WebhookInfo {
     /// ```
     /// use telegram_api_client::WebhookInfo;
     ///
-    /// let info = WebhookInfo { last_error_message: Some("timeout".into()), ..Default::default() };
+    /// let mut info = WebhookInfo::default();
+    /// info.last_error_message = Some("timeout".into());
     /// assert!(info.has_error());
     /// ```
     #[must_use]

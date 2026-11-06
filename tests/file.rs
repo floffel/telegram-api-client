@@ -1,7 +1,6 @@
 //! `getFile` request and response hardening.
 
 use serde_json::{json, Value};
-use std::collections::BTreeMap;
 use telegram_api_client::{
     Error, File, GetFile, MockTransport, TelegramClient, MAX_DOWNLOAD_BYTES, MAX_FILE_ID_BYTES,
 };
@@ -160,13 +159,9 @@ fn download_urls_percent_encode_each_segment() {
 
 #[test]
 fn manually_constructed_unsafe_paths_never_report_downloadable() {
-    let file = File {
-        file_id: "A".into(),
-        file_unique_id: "u".into(),
-        file_size: Some(1),
-        file_path: Some("../secret".into()),
-        extra: BTreeMap::default(),
-    };
+    let mut file = File::new("A", "u");
+    file.file_size = Some(1);
+    file.file_path = Some("../secret".into());
     assert_eq!(file.download_path(), None);
     assert!(!file.is_downloadable());
     assert_eq!(file.fits_download_limit(), Some(true));

@@ -4,6 +4,26 @@ Every shape in this crate is pinned to a published document. This file records
 what was read, when, and what the fixture in `tests/` asserts, so a shape can be
 re-checked instead of remembered.
 
+## API surface contract
+
+The crate separates values Telegram sends from values callers send:
+
+- Update, event, media, chat-member, file and webhook-info structs are received
+  payloads. They carry `#[non_exhaustive]`, so adding a field is patch-compatible
+  and downstream struct literals cannot pin the current field set.
+- Request builders (`SendMessage`, `GetChat`, `SetWebhook`, and the other method
+  bodies) are caller-constructed. They remain exhaustive literals so required
+  parameters stay explicit and request ergonomics are unchanged.
+
+Received structs with all-optional members derive or implement `Default`. For a
+received type with required identifiers, prefer its constructor (`Update::new`,
+`File::new`, `MaskPosition::new`); otherwise start from `Type::default()` and
+assign fields. `MessageId` remains decode-only because a fabricated zero would
+mean a scheduled copy, and `PollMedia` exposes constructors over its private
+representation. `..Default::default()` is not a downstream construction escape
+hatch for a `#[non_exhaustive]` struct. `tests/api_surface.rs` pins both the
+construction paths and the received-type list.
+
 ## Bot API revision
 
 | Item | Value |

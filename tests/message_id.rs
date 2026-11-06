@@ -41,12 +41,10 @@ fn message_id_round_trips_zero_and_positive_values() {
 }
 
 #[test]
-fn direct_construction_does_not_erase_the_wire_invariant() {
-    let invalid = MessageId { message_id: -1 };
-    assert!(!invalid.is_pending());
-    let encoded = serde_json::to_value(invalid).unwrap();
+fn negative_ids_cannot_cross_the_wire() {
+    let invalid = json!({"message_id": -1});
     assert!(
-        serde_json::from_value::<MessageId>(encoded).is_err(),
+        serde_json::from_value::<MessageId>(invalid).is_err(),
         "negative values cannot enter through deserialization"
     );
 }

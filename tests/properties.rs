@@ -119,10 +119,11 @@ proptest! {
         let status = ChatMemberStatus::from(status);
         let member = match &status {
             ChatMemberStatus::Restricted => {
-                ChatMember::Restricted(telegram_api_client::ChatMemberRestricted {
-                    is_member,
-                    ..telegram_api_client::ChatMemberRestricted::default()
-                })
+                {
+                    let mut restricted = telegram_api_client::ChatMemberRestricted::default();
+                    restricted.is_member = is_member;
+                    ChatMember::Restricted(restricted)
+                }
             }
             _ => ChatMember::new(status.clone(), telegram_api_client::User::default()),
         };
@@ -157,10 +158,9 @@ proptest! {
     fn the_restricted_flag_round_trips(
         is_member in any::<Option<bool>>(),
     ) {
-        let member = ChatMember::Restricted(telegram_api_client::ChatMemberRestricted {
-            is_member,
-            ..telegram_api_client::ChatMemberRestricted::default()
-        });
+        let mut restricted = telegram_api_client::ChatMemberRestricted::default();
+        restricted.is_member = is_member;
+        let member = ChatMember::Restricted(restricted);
         let encoded = serde_json::to_string(&member).unwrap();
         let decoded: ChatMember = serde_json::from_str(&encoded).unwrap();
         prop_assert_eq!(decoded.is_member(), is_member);
@@ -180,7 +180,7 @@ proptest! {
         for batch in batches {
             let updates = batch
                 .iter()
-                .map(|id| Update { update_id: *id, ..Update::default() })
+                .map(|id| Update::new(*id))
                 .collect::<Vec<_>>();
             let fresh = cursor.confirm(&updates);
 
@@ -384,13 +384,8 @@ proptest! {
     /// accepted paths never gain URL query or fragment syntax.
     #[test]
     fn arbitrary_file_paths_are_rejected_or_safe(path in "\\PC{0,128}") {
-        let file = File {
-            file_id: "A".into(),
-            file_unique_id: "u".into(),
-            file_size: None,
-            file_path: Some(path),
-            extra: std::collections::BTreeMap::new(),
-        };
+        let mut file = File::new("A", "u");
+        file.file_path = Some(path);
         if let Some(path) = file.download_path() {
             prop_assert!(!path.starts_with('/'));
             prop_assert!(!path.contains(['?', '#', '\\']));
@@ -713,16 +708,15 @@ proptest! {
     fn reaction_totals_are_non_negative_and_do_not_overflow(
         counts in prop::collection::vec(0_i64..=i64::MAX, 0..32),
     ) {
-        let update = MessageReactionCountUpdated {
-            reactions: counts
-                .iter()
-                .map(|count| ReactionCount {
-                    total_count: *count,
-                    ..ReactionCount::default()
-                })
-                .collect(),
-            ..MessageReactionCountUpdated::default()
-        };
+        let mut update = MessageReactionCountUpdated::default();
+        update.reactions = counts
+            .iter()
+            .map(|count| {
+                let mut reaction = ReactionCount::default();
+                reaction.total_count = *count;
+                reaction
+            })
+            .collect();
         let expected = counts
             .iter()
             .try_fold(0_i64, |total, count| total.checked_add(*count));

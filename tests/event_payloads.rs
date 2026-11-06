@@ -117,10 +117,8 @@ fn reaction_count_sums_and_keeps_the_reaction() {
     .expect("i64::MAX is a valid count");
     assert_eq!(maximum.total_count, i64::MAX);
 
-    let overflowing = telegram_api_client::MessageReactionCountUpdated {
-        reactions: vec![maximum, counts[0].clone()],
-        ..telegram_api_client::MessageReactionCountUpdated::default()
-    };
+    let mut overflowing = telegram_api_client::MessageReactionCountUpdated::default();
+    overflowing.reactions = vec![maximum, counts[0].clone()];
     assert_eq!(overflowing.checked_total(), None);
     assert_eq!(overflowing.total(), i64::MAX, "display total saturates");
 }
@@ -240,11 +238,9 @@ fn membership_transitions_are_classified() {
     ];
 
     for (old, new, joined, left, why) in cases {
-        let change = ChatMemberUpdated {
-            old_chat_member: member(old.clone()),
-            new_chat_member: member(new.clone()),
-            ..ChatMemberUpdated::default()
-        };
+        let mut change = ChatMemberUpdated::default();
+        change.old_chat_member = member(old.clone());
+        change.new_chat_member = member(new.clone());
         assert_eq!(change.joined(), joined, "{why}");
         assert_eq!(change.left(), left, "{why}");
     }
@@ -321,16 +317,12 @@ fn locations_compare_by_value_and_survive_nan() {
     assert_eq!(a, b);
     assert_eq!(a, a, "Eq is reflexive for a normal location");
 
-    let nan = Location {
-        latitude: f64::NAN,
-        ..Location::default()
-    };
+    let mut nan = Location::default();
+    nan.latitude = f64::NAN;
     assert_eq!(nan, nan, "bitwise comparison keeps Eq sound for NaN");
 
-    let slightly_off = Location {
-        latitude: 51.050_000_1,
-        ..Location::default()
-    };
+    let mut slightly_off = Location::default();
+    slightly_off.latitude = 51.050_000_1;
     assert_ne!(a, slightly_off);
 
     for invalid in [
