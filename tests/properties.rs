@@ -6,12 +6,13 @@ use serde_json::{Map, Value};
 use std::time::Duration;
 use telegram_api_client::{
     guess_mime, is_idempotent, is_valid_mime, send::MAX_POLL_OPTION, AnswerCallbackQuery,
-    AnswerInlineQuery, ChatId, ChatMember, ChatMemberPresence, ChatMemberStatus, EditTarget,
-    EntityKind, Error, File, GetFile, InlineQueryResult, InlineQueryResultsButton, InputMedia,
-    InputMediaKind, MenuButton, MessageEntity, MessageReactionCountUpdated, MockTransport,
-    MultipartFile, MultipartForm, ParseMode, PollType, ReactionCount, RetryPolicy, SendMessage,
-    SendPoll, TelegramClient, Update, UpdateCursor, MAX_CALLBACK_TEXT, MAX_DOWNLOAD_BYTES,
-    MAX_FILE_ID_BYTES, MAX_INLINE_NEXT_OFFSET_BYTES, MAX_INLINE_START_PARAMETER_BYTES,
+    AnswerInlineQuery, ChatId, ChatMember, ChatMemberPresence, ChatMemberStatus, CopyMessage,
+    EditMessageText, EditTarget, EntityKind, Error, File, GetFile, InlineQueryResult,
+    InlineQueryResultsButton, InputMedia, InputMediaKind, MenuButton, MessageEntity,
+    MessageReactionCountUpdated, MockTransport, MultipartFile, MultipartForm, ParseMode, PollType,
+    ReactionCount, RetryPolicy, SendMessage, SendPoll, TelegramClient, Update, UpdateCursor,
+    MAX_CALLBACK_TEXT, MAX_DOWNLOAD_BYTES, MAX_FILE_ID_BYTES, MAX_INLINE_NEXT_OFFSET_BYTES,
+    MAX_INLINE_START_PARAMETER_BYTES,
 };
 
 proptest! {
@@ -680,6 +681,56 @@ proptest! {
         prop_assert_eq!(update.checked_total(), expected);
         prop_assert_eq!(update.total(), expected.unwrap_or(i64::MAX));
         prop_assert!(update.total() >= 0);
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig { cases: 256, ..ProptestConfig::default() })]
+
+    /// Entity acceptance is exactly the UTF-16 interval `0..=text_len`, with a
+    /// positive length and an end no greater than the text.
+    #[test]
+    fn editing_entities_accept_exactly_the_utf16_text_range(
+        text in "\\PC{1,64}",
+        offset in -4_i64..80,
+        length in -4_i64..80,
+    ) {
+        let text_len = i64::try_from(text.encode_utf16().count()).unwrap();
+        let expected = offset >= 0
+            && length > 0
+            && offset.checked_add(length).is_some_and(|end| end <= text_len);
+        let request = EditMessageText::new(1_i64, 7, text)
+            .with_entities(vec![MessageEntity::bold(offset, length)]);
+        prop_assert_eq!(request.validate().is_ok(), expected, "offset {}, length {}, text units {}", offset, length, text_len);
+    }
+
+    /// A caption entity's range is checked against its caption, and a missing
+    /// caption has no range an entity can address.
+    #[test]
+    fn copy_caption_entities_accept_exactly_the_utf16_caption_range(
+        caption in proptest::option::of("\\PC{1,64}"),
+        offset in -4_i64..80,
+        length in -4_i64..80,
+    ) {
+        let text_len = caption.as_deref().map_or(0, |text| {
+            i64::try_from(text.encode_utf16().count()).unwrap()
+        });
+        let expected = offset >= 0
+            && length > 0
+            && offset.checked_add(length).is_some_and(|end| end <= text_len);
+        let mut request = CopyMessage::new(1_i64, -1001_i64, 7);
+        request.caption = caption;
+        request.caption_entities = vec![MessageEntity::bold(offset, length)];
+        prop_assert_eq!(request.validate().is_ok(), expected, "offset {}, length {}, text units {}", offset, length, text_len);
+    }
+
+    /// `copyMessage` accepts a reply target exactly when it is absent or
+    /// positive, including both ends of the `i64` range.
+    #[test]
+    fn copy_reply_target_accepts_exactly_positive_ids(reply_to in any::<Option<i64>>()) {
+        let mut request = CopyMessage::new(1_i64, -1001_i64, 7);
+        request.reply_to_message_id = reply_to;
+        prop_assert_eq!(request.validate().is_ok(), reply_to.is_none_or(|id| id > 0), "id {:?}", reply_to);
     }
 }
 

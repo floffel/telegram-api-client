@@ -138,7 +138,7 @@ fn every_media_builder_composes() {
     let json = serde_json::to_value(&photo).expect("serialize");
     assert_eq!(json["caption"], json!("c"));
     assert!(json["reply_markup"]["keyboard"].is_array());
-    assert!(photo.multipart_form().is_none(), "json send");
+    assert!(photo.multipart_form().unwrap().is_none(), "json send");
 
     let document = SendDocument::new(-1001_i64, "file-id").with_reply_markup(silent);
     assert_eq!(document.options.delivery.disable_notification, None);
@@ -157,7 +157,10 @@ fn every_media_builder_composes() {
     .silent()
     .reply_to(5);
     assert!(album.validate().is_ok());
-    assert!(album.multipart_form().is_none(), "no uploads, no multipart");
+    assert!(
+        album.multipart_form().unwrap().is_none(),
+        "no uploads, no multipart"
+    );
 
     let location = SendLocation::new(-1001_i64, 48.1, 11.5).silent();
     assert!(location.validate().is_ok());
@@ -285,7 +288,7 @@ fn edit_builders_compose() {
         .with_caption("c")
         .with_reply_markup(markup());
     assert!(media.validate().is_ok());
-    assert!(media.multipart_form().is_none());
+    assert!(media.multipart_form().unwrap().is_none());
 
     let empty = EditMessageMedia::new(1_i64, 7, InputMedia::photo(""));
     assert!(matches!(

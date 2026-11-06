@@ -167,13 +167,14 @@ macro_rules! media_method {
         /// # Errors
         ///
         /// [`Error::InvalidRequest`] when the request or the file does not
-        /// validate, plus transport and Bot API failures. A 5xx is reported as
-        /// [`Error::Ambiguous`] and never retried — the upload may have been
+        /// validate, [`Error::Payload`] when an upload body cannot be
+        /// serialized, plus transport and Bot API failures. A 5xx is reported
+        /// as [`Error::Ambiguous`] and never retried — the upload may have been
         /// accepted — and so is an answer that cannot be decoded: the media may
         /// be there even though the `result` was not readable.
         pub async fn $name(&self, request: &$request) -> Result<$response> {
             request.validate()?;
-            let form = request.multipart_form();
+            let form = request.multipart_form()?;
             let response = self.call_maybe_upload($method, request, form).await?;
             take_result($method, &response)
         }

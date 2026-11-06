@@ -5,7 +5,8 @@ use serde_json::Value;
 
 use crate::error::{Error, Result};
 use crate::send::{
-    text_field, validate_chat, validate_text, validate_thread, MAX_CAPTION, MAX_MESSAGE_TEXT,
+    serialized_multipart_object, text_field, validate_chat, validate_entities, validate_text,
+    validate_thread, MAX_CAPTION, MAX_MESSAGE_TEXT,
 };
 use crate::transport::MultipartForm;
 use crate::types::{ChatId, InputMedia, LinkPreviewOptions, MessageEntity, ParseMode, ReplyMarkup};
@@ -249,16 +250,16 @@ impl EditMessageText {
         self
     }
 
-    /// Checks the target and the text (empty text deletes nothing — Telegram
-    /// rejects it).
+    /// Checks the target, the text and every formatting-entity range.
     ///
     /// # Errors
     ///
-    /// [`Error::InvalidRequest`] for an invalid target, empty text, or text
-    /// over [`MAX_MESSAGE_TEXT`].
+    /// [`Error::InvalidRequest`] for an invalid target, empty text, text over
+    /// [`MAX_MESSAGE_TEXT`], or an entity outside the text's UTF-16 range.
     pub fn validate(&self) -> Result<()> {
         self.target.validate()?;
-        validate_text("text", &self.text, MAX_MESSAGE_TEXT)
+        validate_text("text", &self.text, MAX_MESSAGE_TEXT)?;
+        validate_entities("entities", &self.entities, &self.text)
     }
 }
 
@@ -333,17 +334,21 @@ impl EditMessageCaption {
         self
     }
 
-    /// Checks the target and the caption length.
+    /// Checks the target, caption length and caption-entity ranges.
     ///
     /// # Errors
     ///
-    /// [`Error::InvalidRequest`] for an invalid target, or a caption that is
-    /// empty when set or longer than [`MAX_CAPTION`].
+    /// [`Error::InvalidRequest`] for an invalid target, a caption that is empty
+    /// when set or longer than [`MAX_CAPTION`], or a caption entity outside the
+    /// caption's UTF-16 range.
     pub fn validate(&self) -> Result<()> {
         self.target.validate()?;
         match self.caption.as_deref() {
-            None => Ok(()),
-            Some(caption) => validate_text("caption", caption, MAX_CAPTION),
+            None => validate_entities("caption_entities", &self.caption_entities, ""),
+            Some(caption) => {
+                validate_text("caption", caption, MAX_CAPTION)?;
+                validate_entities("caption_entities", &self.caption_entities, caption)
+            }
         }
     }
 }
@@ -443,13 +448,25 @@ impl EditMessageMedia {
             )?;
         }
         match self.media.caption.as_deref() {
-            None => Ok(()),
-            Some(caption) => validate_text("caption", caption, MAX_CAPTION),
+            None => validate_entities("caption_entities", &self.media.caption_entities, ""),
+            Some(caption) => {
+                validate_text("caption", caption, MAX_CAPTION)?;
+                validate_entities("caption_entities", &self.media.caption_entities, caption)
+            }
         }
     }
 
-    /// The multipart body for this edit, or `None` when the new media is
-    /// referenced by `file_id`/URL.
+    /// The multipart body for this edit, with serialization failures kept as
+    /// typed errors.
+    ///
+    /// `Ok(None)` means the new media is referenced by `file_id`/URL. Once an
+    /// upload is present, a serialization failure returns [`Error::Payload`]
+    /// with the serde failure as its source instead of discarding the upload.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Payload`] when the new media carries an upload but the request
+    /// could not be serialized as a JSON object.
     ///
     /// ```rust
     /// use telegram_api_client::{EditMessageMedia, InputMedia, UploadFile};
@@ -459,20 +476,18 @@ impl EditMessageMedia {
     ///     7,
     ///     InputMedia::photo("ignored").with_upload(UploadFile::new("new.png", vec![1, 2])),
     /// );
-    /// let form = edit.multipart_form().unwrap();
+    /// let form = edit.multipart_form().unwrap().unwrap();
     /// assert_eq!(form.files()[0].field, "file0");
     /// assert!(form.json_fields()["media"].as_str().unwrap().contains("attach://file0"));
     ///
     /// let json_only = EditMessageMedia::new(1, 7, InputMedia::photo("AgACAgI"));
-    /// assert!(json_only.multipart_form().is_none());
+    /// assert!(json_only.multipart_form().unwrap().is_none());
     /// ```
-    #[must_use]
-    pub fn multipart_form(&self) -> Option<MultipartForm> {
-        let upload = self.media.upload.as_ref()?;
-        let body = serde_json::to_value(self).ok()?;
-        let Value::Object(map) = body else {
-            return None;
+    pub fn multipart_form(&self) -> Result<Option<MultipartForm>> {
+        let Some(upload) = self.media.upload.as_ref() else {
+            return Ok(None);
         };
+        let map = serialized_multipart_object(self, "EditMessageMedia")?;
 
         let mut form = MultipartForm::new();
         for (key, value) in map {
@@ -490,7 +505,7 @@ impl EditMessageMedia {
             }
             form = form.field(key, text_field(&value));
         }
-        Some(form.with_file(upload.to_part("file0")))
+        Ok(Some(form.with_file(upload.to_part("file0"))))
     }
 }
 
@@ -759,12 +774,14 @@ impl CopyMessage {
         self
     }
 
-    /// Checks both chats, the message id and the caption.
+    /// Checks both chats, the message id, the caption and its entities.
     ///
     /// # Errors
     ///
-    /// [`Error::InvalidRequest`] for an unusable chat, a non-positive id, or a
-    /// caption that is empty when set or longer than [`MAX_CAPTION`].
+    /// [`Error::InvalidRequest`] for an unusable chat, a non-positive id, a
+    /// non-positive `reply_to_message_id`, a caption that is empty when set or
+    /// longer than [`MAX_CAPTION`], or a caption entity outside the caption's
+    /// UTF-16 range.
     pub fn validate(&self) -> Result<()> {
         validate_chat("chat_id", &self.chat_id)?;
         validate_chat("from_chat_id", &self.from_chat_id)?;
@@ -775,9 +792,13 @@ impl CopyMessage {
             });
         }
         match self.caption.as_deref() {
-            None => Ok(()),
-            Some(caption) => validate_text("caption", caption, MAX_CAPTION),
+            None => validate_entities("caption_entities", &self.caption_entities, "")?,
+            Some(caption) => {
+                validate_text("caption", caption, MAX_CAPTION)?;
+                validate_entities("caption_entities", &self.caption_entities, caption)?;
+            }
         }
+        validate_thread("reply_to_message_id", self.reply_to_message_id)
     }
 }
 
