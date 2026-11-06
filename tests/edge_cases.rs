@@ -503,10 +503,7 @@ fn edit_target_needs_exactly_one_addressing_form() {
     // Both forms at once.
     let mut target = EditTarget::chat(CHAT, 7);
     target.inline_message_id = Some("inline".into());
-    assert!(matches!(
-        target.validate(),
-        Err(Error::InvalidRequest { .. })
-    ));
+    assert_invalid(target.validate().unwrap_err(), "inline_message_id");
 
     // Neither form.
     assert!(EditTarget::default().validate().is_err());
@@ -518,15 +515,82 @@ fn edit_target_needs_exactly_one_addressing_form() {
     };
     assert_invalid(half.validate().unwrap_err(), "message_id");
 
-    // Blank inline id is treated as absent.
-    let mut blank = EditTarget::inline("   ");
-    blank.inline_message_id = Some("   ".into());
-    assert!(blank.validate().is_err());
-
     // Non-positive message id.
     assert_invalid(
         EditTarget::chat(CHAT, 0).validate().unwrap_err(),
         "message_id",
+    );
+}
+
+/// #36: a blank `inline_message_id` is a *present* addressing form. Reading it
+/// as absent let `chat_id` + `message_id` validate as a chat edit while the
+/// serializer still sent the blank field, so the body carried both addressing
+/// forms.
+#[test]
+fn blank_inline_message_id_is_rejected_not_ignored() {
+    /// The reason string of an `InvalidRequest`.
+    #[track_caller]
+    fn reason(error: Error) -> String {
+        match error {
+            Error::InvalidRequest { reason, .. } => reason,
+            other => panic!("expected InvalidRequest, got {other:?}"),
+        }
+    }
+
+    // Boundary pair: `None` is absent, anything `Some` is present. Between the
+    // two lies the blank value, which used to be read as absent.
+    assert!(EditTarget::chat(CHAT, 7).validate().is_ok());
+    for blank in ["", " ", "   ", "\t", "\n", " \t\n "] {
+        // On its own: no longer "neither form", but a blank field.
+        let alone = EditTarget::inline(blank);
+        assert_invalid(alone.validate().unwrap_err(), "inline_message_id");
+        assert_eq!(
+            reason(EditTarget::inline(blank).validate().unwrap_err()),
+            "must not be empty"
+        );
+
+        // Next to a complete chat form: refused, because the serialized body
+        // would carry both forms.
+        let mut both = EditTarget::chat(CHAT, 7);
+        both.inline_message_id = Some(blank.to_string());
+        let body = serde_json::to_value(&both).expect("serialize");
+        assert_eq!(body["inline_message_id"], json!(blank), "the field is sent");
+        assert_eq!(body["chat_id"], json!(CHAT));
+        assert_eq!(body["message_id"], json!(7));
+        assert_invalid(both.validate().unwrap_err(), "inline_message_id");
+        assert_eq!(
+            reason(both.validate().unwrap_err()),
+            "must not be empty",
+            "a blank id is reported as blank, not as a second form"
+        );
+    }
+
+    // One non-blank id next to a chat form is the "both forms" error instead.
+    let mut two_forms = EditTarget::chat(CHAT, 7);
+    two_forms.inline_message_id = Some(" inline ".into());
+    assert_invalid(two_forms.validate().unwrap_err(), "inline_message_id");
+    assert_eq!(
+        reason(two_forms.validate().unwrap_err()),
+        "use either chat_id + message_id or inline_message_id, not both"
+    );
+
+    // Nothing is put on the wire: see
+    // `blank_inline_message_id_never_reaches_the_wire`.
+}
+
+/// #36, end to end: the client validates before it builds a request, so an
+/// `editMessageText` body carrying both addressing forms is never posted.
+#[tokio::test]
+async fn blank_inline_message_id_never_reaches_the_wire() {
+    let (client, transport) = client();
+    let mut request = EditMessageText::new(CHAT, 7, "x");
+    request.target.inline_message_id = Some("   ".into());
+
+    let error = client.edit_message_text(&request).await.unwrap_err();
+    assert_invalid(error, "inline_message_id");
+    assert!(
+        transport.calls().is_empty(),
+        "a rejected request must not reach the transport"
     );
 }
 

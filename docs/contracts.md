@@ -100,27 +100,28 @@ the status alone does not say whether a restricted user is in the chat.
 | Source URL | <https://core.telegram.org/bots/api#chatmemberrestricted> |
 | Fetched | 2026-11-02 |
 
-## `InlineQueryResult`
+## Edit addressing: `chat_id`/`message_id` vs `inline_message_id`
 
-Quote, "InlineQueryResult": *"This object represents one result of an inline
-query. Telegram clients currently support results of the following 20 types"* —
-and `answerInlineQuery` adds *"No more than 50 results per query are allowed."*
-The two members every one of the 20 shapes repeats are the ones this crate can
-check without modelling the other 19.
+The four edit methods (`editMessageText`, `editMessageCaption`,
+`editMessageMedia`, `editMessageReplyMarkup`) share one parameter block. Quote,
+`editMessageText`:
 
-| Field | Type | Description on the page | Enforced as |
-| --- | --- | --- | --- |
-| `type` | String | "Type of the result, must be article" (per shape) | non-empty string; an unknown type is carried, not rejected |
-| `id` | String | "Unique identifier for this result, 1-64 Bytes" | string, 1-64 UTF-8 bytes, unique within one answer |
-| all other members | — | shape-specific | carried verbatim |
+| Parameter | Quote |
+| --- | --- |
+| `chat_id` | *"Required if `inline_message_id` is not specified."* |
+| `message_id` | *"Required if `inline_message_id` is not specified. Identifier of the message to edit."* |
+| `inline_message_id` | *"Required if `chat_id` and `message_id` are not specified. Identifier of the inline message."* |
 
-`id` is compared as bytes, so a 16-character string of four-byte emoji is exactly
-at the limit and a 17-character one is over. `results` itself is an array, which
-is why a `null`, a string or an array element is refused before the wire.
+The condition is **specified**, not "non-blank", so the crate reads presence:
+`EditTarget` serializes `inline_message_id` whenever it is `Some`, and
+`EditTarget::validate` therefore treats every `Some` as the inline form. A blank
+value cannot be silently dropped from the rule while staying in the body — it is
+refused with `Error::InvalidRequest { field: "inline_message_id" }` instead
+(#36).
 
 | Item | Value |
 | --- | --- |
-| Source URL | <https://core.telegram.org/bots/api#inlinequeryresult> |
+| Source URL | <https://core.telegram.org/bots/api#editmessagetext> |
 | Fetched | 2026-11-02 |
 
 ## Known gaps (tracked, not hidden)

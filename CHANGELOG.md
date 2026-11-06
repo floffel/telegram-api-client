@@ -147,6 +147,26 @@ means for this API is spelled out in the README under
   restricted vs. every other status) and the wire spellings, `tests/properties.rs`
   checks the rule for arbitrary statuses and flags plus the JSON round trip, and
   `docs/contracts.md` records the quote and source.
+- **A blank `inline_message_id` is refused instead of read as absent** (#36).
+  `EditTarget::validate` measured the inline form with `!trim().is_empty()`, so a
+  whitespace-only id counted as no inline form at all: `EditTarget::chat(chat,
+  message)` with `inline_message_id = Some("  ")` validated as a plain chat edit,
+  while serialization skips only `None` — the body went out carrying
+  `inline_message_id: "  "` next to `chat_id` and `message_id`, two addressing
+  forms for one edit, which Telegram can only reject or misroute. A set
+  `inline_message_id` is now the inline form whatever it contains, and a blank
+  value is an `Error::InvalidRequest { field: "inline_message_id", reason: "must
+  not be empty" }` — checked before the exclusivity rule, so a malformed field is
+  named as malformed rather than reported as a second addressing form. `None`
+  still means "no inline form", `chat_id + message_id` alone still validates, and
+  nothing changed for a non-blank inline id. Stricter validation for input that
+  had no valid meaning, so this is patch-level under the README's rules.
+  `tests/edge_cases.rs` pins the boundary (`None` accepted; `""`, `" "`, `"\t"`,
+  `"\n"`, `" \t\n "` refused, alone and next to a complete chat form), asserts
+  that the blank field really is serialized — which is why the refusal is what
+  keeps the body unambiguous — and that the client rejects the request before the
+  transport sees a call. Doctests on `EditTarget`, `EditTarget::chat`,
+  `EditTarget::inline` and `EditTarget::validate`.
 
 ## [0.1.8] - 2026-10-28
 
