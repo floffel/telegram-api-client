@@ -84,7 +84,8 @@ follow the payload types, so `"kicked"` decodes to `ChatMember::Banned`.
 | an absent mandatory `can_*` right | `false` (under-reporting, never an invented permission) |
 | an absent optional `can_*` right | `None` |
 | `until_date` | the wire value, `0` meaning "forever" — not filtered out |
-| presence | `is_present()`: true for creator/administrator/member, `is_member` for restricted, false for left/kicked/unknown |
+| restricted `is_member` | `Option<bool>`: `Some(true)`/`Some(false)` from the wire, `None` when omitted |
+| presence | `presence()` / `is_present()`: creator/administrator/member are present; restricted is absent only for explicit `is_member: false`; left/kicked are absent; unknown is neither |
 
 | Item | Value |
 | --- | --- |

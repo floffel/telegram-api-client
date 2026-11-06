@@ -346,10 +346,15 @@ fn restricted_non_members_are_not_present() {
     use telegram_api_client::{ChatMember, ChatMemberPresence, ChatMemberStatus};
 
     fn member(status: &str, is_member: Option<bool>) -> ChatMember {
-        ChatMember {
-            status: ChatMemberStatus::from(status),
-            is_member,
-            ..ChatMember::default()
+        let status = ChatMemberStatus::from(status);
+        match status {
+            ChatMemberStatus::Restricted => {
+                ChatMember::Restricted(telegram_api_client::ChatMemberRestricted {
+                    is_member,
+                    ..telegram_api_client::ChatMemberRestricted::default()
+                })
+            }
+            status => ChatMember::new(status, telegram_api_client::User::default()),
         }
     }
 
@@ -405,12 +410,12 @@ fn restricted_flag_survives_the_wire() {
     let snake: ChatMember =
         serde_json::from_str(r#"{"status":"restricted","user":{"id":42},"is_member":false}"#)
             .expect("snake_case flag");
-    assert_eq!(snake.is_member, Some(false));
+    assert_eq!(snake.is_member(), Some(false));
 
     let camel: ChatMember =
         serde_json::from_str(r#"{"status":"restricted","user":{"id":42},"isMember":true}"#)
             .expect("camelCase flag");
-    assert_eq!(camel.is_member, Some(true));
+    assert_eq!(camel.is_member(), Some(true));
 
     // A flag of the wrong shape is a decode error, not a silent `false`.
     assert!(serde_json::from_str::<ChatMember>(
@@ -420,10 +425,10 @@ fn restricted_flag_survives_the_wire() {
 
     // An unset flag is omitted instead of being written as `null`, so a
     // re-serialized member keeps the shape Telegram sent.
-    let plain = ChatMember {
-        status: ChatMemberStatus::Member,
-        ..ChatMember::default()
-    };
+    let plain = ChatMember::new(
+        ChatMemberStatus::Member,
+        telegram_api_client::User::default(),
+    );
     let encoded = serde_json::to_value(&plain).expect("serialize");
     assert!(encoded.get("is_member").is_none(), "{encoded}");
 
@@ -624,11 +629,14 @@ fn chat_member_new_covers_every_status() {
         let member = ChatMember::new(status.clone(), user.clone());
         assert_eq!(member.status(), status);
         assert_eq!(member.user().id, 7);
-        // A restricted member built this way carries no `is_member`, so it is
-        // not presence either.
+        // A restricted member built this way carries no `is_member`; a missing
+        // flag is still present under the current policy.
         let expected = matches!(
             status,
-            ChatMemberStatus::Creator | ChatMemberStatus::Administrator | ChatMemberStatus::Member
+            ChatMemberStatus::Creator
+                | ChatMemberStatus::Administrator
+                | ChatMemberStatus::Member
+                | ChatMemberStatus::Restricted
         );
         assert_eq!(member.is_present(), expected, "presence of {status:?}");
     }
@@ -696,8 +704,12 @@ fn restricted_presence_follows_is_member() {
     assert!(!absent.is_present());
     assert_eq!(absent.is_member(), Some(false));
 
-    // A shape without the bit at all is not presence either.
-    assert!(!ChatMember::new(ChatMemberStatus::Restricted, User::default()).is_present());
+    // A shape without the bit at all is not turned into an absence.
+    assert!(ChatMember::new(ChatMemberStatus::Restricted, User::default()).is_present());
+    assert_eq!(
+        ChatMember::new(ChatMemberStatus::Restricted, User::default()).is_member(),
+        None
+    );
 }
 
 /// Every member is decoded as the type the Bot API documents. The documented

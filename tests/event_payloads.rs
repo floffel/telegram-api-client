@@ -191,7 +191,7 @@ fn boost_sources_are_tolerant_and_name_their_kind() {
 fn member(status: ChatMemberStatus) -> ChatMember {
     match ChatMember::new(status, User::default()) {
         ChatMember::Restricted(mut restricted) => {
-            restricted.is_member = true;
+            restricted.is_member = Some(true);
             ChatMember::Restricted(restricted)
         }
         other => other,
