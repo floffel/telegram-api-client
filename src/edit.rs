@@ -1,6 +1,6 @@
 //! Editing, deleting, forwarding and copying messages.
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 
 use crate::error::{Error, Result};
@@ -859,10 +859,46 @@ pub enum EditResult {
 ///
 /// let created: MessageId = serde_json::from_str(r#"{"message_id": 11}"#).unwrap();
 /// assert_eq!(created.message_id, 11);
+/// assert!(!created.is_pending());
+///
+/// // Telegram returns 0 when it schedules a copy instead of sending now.
+/// let scheduled: MessageId = serde_json::from_str(r#"{"message_id": 0}"#).unwrap();
+/// assert!(scheduled.is_pending(), "the id is not usable until the copy is sent");
 /// ```
-#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
+///
+/// An absent, null, mistyped, or negative `message_id` is a decoding error. In
+/// particular, there is no [`Default`] implementation: a fabricated zero would
+/// be indistinguishable from a scheduled copy.
+///
+/// ```compile_fail
+/// let _ = telegram_api_client::MessageId::default();
+/// ```
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 pub struct MessageId {
-    /// Identifier of the created message.
-    #[serde(default)]
+    /// Identifier of the created message, or `0` when the copy was scheduled.
+    #[serde(deserialize_with = "deserialize_message_id")]
     pub message_id: i64,
+}
+
+impl MessageId {
+    /// Whether Telegram scheduled the copy instead of sending it immediately.
+    ///
+    /// A pending message has id `0` and is not usable until Telegram sends it.
+    #[must_use]
+    pub const fn is_pending(&self) -> bool {
+        self.message_id == 0
+    }
+}
+
+fn deserialize_message_id<'de, D>(deserializer: D) -> std::result::Result<i64, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let message_id = i64::deserialize(deserializer)?;
+    if message_id < 0 {
+        return Err(serde::de::Error::custom(format!(
+            "message_id must not be negative, got {message_id}"
+        )));
+    }
+    Ok(message_id)
 }
