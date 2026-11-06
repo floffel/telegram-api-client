@@ -44,7 +44,8 @@ pub mod webhook_api;
 
 pub use callback::{
     AnswerCallbackQuery, AnswerInlineQuery, InlineQueryResult, InlineQueryResultsButton,
-    MenuButton, SetChatMenuButton, MAX_INLINE_RESULT_ID_BYTES,
+    MenuButton, SetChatMenuButton, MAX_CALLBACK_TEXT, MAX_INLINE_NEXT_OFFSET_BYTES,
+    MAX_INLINE_RESULTS, MAX_INLINE_RESULT_ID_BYTES, MAX_INLINE_START_PARAMETER_BYTES,
 };
 pub use chat::{
     BanChatMember, ChatMember, ChatMemberPresence, GetChat, GetChatMember, PinChatMessage,

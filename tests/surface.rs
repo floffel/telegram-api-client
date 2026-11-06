@@ -337,6 +337,13 @@ fn callback_and_menu_builders_compose() {
 
     let button = InlineQueryResultsButton::start("Go", "param");
     assert_eq!(button.start_parameter.as_deref(), Some("param"));
+    assert!(button.validate().is_ok());
+    let app = InlineQueryResultsButton::web_app("Open", "https://example.com/app");
+    assert_eq!(
+        app.web_app.as_ref().map(|app| app.url.as_str()),
+        Some("https://example.com/app")
+    );
+    assert!(app.validate().is_ok());
 
     let inline = AnswerInlineQuery::new("q-1", vec![raw])
         .with_cache_time(30)
@@ -377,6 +384,22 @@ fn callback_and_menu_builders_compose() {
     let scoped = SetChatMenuButton::for_chat(1_i64, MenuButton::default_menu());
     assert_eq!(scoped.chat_id, Some(ChatId::Id(1)));
     assert!(scoped.validate().is_ok());
+
+    assert!(
+        SetChatMenuButton::global(MenuButton::web_app("Open", "https://example.com"))
+            .validate()
+            .is_ok()
+    );
+    assert!(
+        SetChatMenuButton::global(MenuButton::web_app("", "https://example.com"))
+            .validate()
+            .is_err()
+    );
+    assert!(
+        SetChatMenuButton::global(MenuButton::web_app("Open", "http://example.com"))
+            .validate()
+            .is_err()
+    );
 }
 
 #[test]

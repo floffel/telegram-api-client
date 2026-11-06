@@ -5,10 +5,11 @@ use serde_json::{json, Value};
 use telegram_api_client::{
     AnswerCallbackQuery, AnswerInlineQuery, BanChatMember, ChatId, ChatType, CopyMessage,
     DeleteMessage, EditMessageCaption, EditMessageText, EditTarget, EntityKind, Error,
-    GetChatMember, GetFile, GetUpdates, InlineQueryResult, InputMedia, LinkPreviewOptions,
-    MenuButton, MessageEntity, MockReply, MockTransport, ParseMode, PollType, ReplyMarkup,
-    SendDice, SendLocation, SendMediaGroup, SendMessage, SendPhoto, SendPoll, SendVenue,
-    SetChatMenuButton, SetWebhook, TelegramClient, Update, UpdateCursor, WebhookGuard, WebhookInfo,
+    GetChatMember, GetFile, GetUpdates, InlineQueryResult, InlineQueryResultsButton, InputMedia,
+    LinkPreviewOptions, MenuButton, MessageEntity, MockReply, MockTransport, ParseMode, PollType,
+    ReplyMarkup, SendDice, SendLocation, SendMediaGroup, SendMessage, SendPhoto, SendPoll,
+    SendVenue, SetChatMenuButton, SetWebhook, TelegramClient, Update, UpdateCursor, WebAppInfo,
+    WebhookGuard, WebhookInfo,
 };
 
 const CHAT: i64 = -1001;
@@ -613,6 +614,157 @@ fn callback_text_boundary() {
         AnswerCallbackQuery::new("").validate().unwrap_err(),
         "callback_query_id",
     );
+
+    // Telegram counts UTF-16 code units, so a non-BMP emoji costs two.
+    let emoji_at_limit = "🎯".repeat(100);
+    assert_eq!(emoji_at_limit.chars().count(), 100);
+    assert_eq!(emoji_at_limit.encode_utf16().count(), 200);
+    assert!(AnswerCallbackQuery::new("id")
+        .with_text(emoji_at_limit)
+        .validate()
+        .is_ok());
+    assert_invalid(
+        AnswerCallbackQuery::new("id")
+            .with_text("🎯".repeat(101))
+            .validate()
+            .unwrap_err(),
+        "text",
+    );
+}
+
+#[test]
+fn inline_next_offset_boundary_is_measured_in_bytes() {
+    let answer = |offset: String| {
+        let mut answer =
+            AnswerInlineQuery::new("q", vec![InlineQueryResult::article("1", "t", "m")]);
+        answer.next_offset = Some(offset);
+        answer
+    };
+    assert!(answer("x".repeat(64)).validate().is_ok());
+    assert_invalid(
+        answer("x".repeat(65)).validate().unwrap_err(),
+        "next_offset",
+    );
+
+    // UTF-8 bytes, not characters: 16 four-byte emoji fit and 17 do not.
+    assert!(answer("🎯".repeat(16)).validate().is_ok());
+    assert_invalid(
+        answer("🎯".repeat(17)).validate().unwrap_err(),
+        "next_offset",
+    );
+    assert!(
+        answer(String::new()).validate().is_ok(),
+        "empty means no more pages"
+    );
+}
+
+#[test]
+fn inline_result_button_requires_exactly_one_valid_payload() {
+    let answer = |button| {
+        let mut answer =
+            AnswerInlineQuery::new("q", vec![InlineQueryResult::article("1", "t", "m")]);
+        answer.button = Some(button);
+        answer
+    };
+
+    assert!(InlineQueryResultsButton::start("Go", "abc_123-XYZ")
+        .validate()
+        .is_ok());
+    assert!(InlineQueryResultsButton::start("Go", "x".repeat(64))
+        .validate()
+        .is_ok());
+    assert!(
+        InlineQueryResultsButton::web_app("Open", "https://example.com/app")
+            .validate()
+            .is_ok()
+    );
+
+    for start in [
+        String::new(),
+        "x".repeat(65),
+        "bad space".to_string(),
+        "ümlaut".to_string(),
+        "a/b".to_string(),
+        "a.b".to_string(),
+    ] {
+        assert_invalid(
+            InlineQueryResultsButton::start("Go", start)
+                .validate()
+                .unwrap_err(),
+            "button",
+        );
+    }
+    assert_invalid(
+        InlineQueryResultsButton::start("", "ok")
+            .validate()
+            .unwrap_err(),
+        "button",
+    );
+    assert_invalid(
+        InlineQueryResultsButton::default().validate().unwrap_err(),
+        "button",
+    );
+    let both = InlineQueryResultsButton {
+        text: "Go".into(),
+        start_parameter: Some("ok".into()),
+        web_app: Some(WebAppInfo::new("https://example.com/app")),
+    };
+    assert_invalid(both.validate().unwrap_err(), "button");
+    for url in ["", "http://example.com", "https://", " https://example.com"] {
+        assert_invalid(
+            InlineQueryResultsButton::web_app("Open", url)
+                .validate()
+                .unwrap_err(),
+            "button",
+        );
+    }
+
+    assert_invalid(
+        answer(InlineQueryResultsButton::default())
+            .validate()
+            .unwrap_err(),
+        "button",
+    );
+}
+
+#[test]
+fn malformed_web_app_menu_button_is_a_decode_error() {
+    for raw in [
+        r#"{"type":"web_app","web_app":{"url":"https://example.com"}}"#,
+        r#"{"type":"web_app","text":7,"web_app":{"url":"https://example.com"}}"#,
+        r#"{"type":"web_app","text":"Open"}"#,
+        r#"{"type":"web_app","text":"Open","web_app":"https://example.com"}"#,
+        r#"{"type":"web_app","text":"Open","web_app":{}}"#,
+        r#"{"type":"web_app","text":"Open","web_app":{"url":7}}"#,
+    ] {
+        assert!(
+            serde_json::from_str::<MenuButton>(raw).is_err(),
+            "must not fabricate required members: {raw}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn invalid_callback_inline_and_menu_requests_never_reach_the_wire() {
+    let (client, transport) = client();
+
+    let callback = AnswerCallbackQuery::new("id").with_text("🎯".repeat(101));
+    assert_invalid(
+        client.answer_callback_query(&callback).await.unwrap_err(),
+        "text",
+    );
+
+    let mut inline = AnswerInlineQuery::new("q", vec![InlineQueryResult::article("1", "t", "m")]);
+    inline.next_offset = Some("x".repeat(65));
+    assert_invalid(
+        client.answer_inline_query(&inline).await.unwrap_err(),
+        "next_offset",
+    );
+
+    let menu = SetChatMenuButton::global(MenuButton::web_app("", "http://example.com"));
+    let error = client.set_chat_menu_button(&menu).await.unwrap_err();
+    assert_invalid(error, "menu_button");
+    assert_eq!(transport.calls(), []);
 }
 
 #[test]
@@ -1086,12 +1238,6 @@ fn menu_button_preserves_unknown_members_on_known_variants() {
         assert_eq!(button, MenuButton::Unknown(original.clone()), "{raw}");
         assert_eq!(serde_json::to_value(&button).unwrap(), original, "{raw}");
     }
-
-    // A `web_app` payload that lost its shape still parses into the variant,
-    // with the modelled members left empty.
-    let broken: MenuButton =
-        serde_json::from_str(r#"{"type":"web_app","text":5,"web_app":"nope"}"#).unwrap();
-    assert_eq!(broken, MenuButton::web_app("", ""));
 
     // `MenuButton::default()` is the `default` button, so `SetChatMenuButton`'s
     // derived default matches the wire default.

@@ -5,11 +5,13 @@ use proptest::prelude::*;
 use serde_json::{Map, Value};
 use std::time::Duration;
 use telegram_api_client::{
-    guess_mime, is_idempotent, is_valid_mime, send::MAX_POLL_OPTION, ChatId, ChatMember,
-    ChatMemberPresence, ChatMemberStatus, EditTarget, EntityKind, Error, File, GetFile, InputMedia,
+    guess_mime, is_idempotent, is_valid_mime, send::MAX_POLL_OPTION, AnswerCallbackQuery,
+    AnswerInlineQuery, ChatId, ChatMember, ChatMemberPresence, ChatMemberStatus, EditTarget,
+    EntityKind, Error, File, GetFile, InlineQueryResult, InlineQueryResultsButton, InputMedia,
     InputMediaKind, MenuButton, MessageEntity, MockTransport, MultipartFile, MultipartForm,
     ParseMode, PollType, RetryPolicy, SendMessage, SendPoll, TelegramClient, Update, UpdateCursor,
-    MAX_DOWNLOAD_BYTES, MAX_FILE_ID_BYTES,
+    MAX_CALLBACK_TEXT, MAX_DOWNLOAD_BYTES, MAX_FILE_ID_BYTES, MAX_INLINE_NEXT_OFFSET_BYTES,
+    MAX_INLINE_START_PARAMETER_BYTES,
 };
 
 proptest! {
@@ -407,6 +409,38 @@ proptest! {
         }
         let back: MenuButton = serde_json::from_value(json).unwrap();
         prop_assert_eq!(back, button);
+    }
+
+    /// Callback text accepts exactly the 200 UTF-16 code-unit window Telegram
+    /// documents, including surrogate pairs.
+    #[test]
+    fn callback_text_accepts_exactly_the_utf16_window(text in "\\PC{0,240}") {
+        let answer = AnswerCallbackQuery::new("id").with_text(text.clone());
+        prop_assert_eq!(answer.validate().is_ok(), text.encode_utf16().count() <= MAX_CALLBACK_TEXT);
+    }
+
+    /// `next_offset` is a byte limit; empty is the documented no-more-pages
+    /// value.
+    #[test]
+    fn inline_next_offset_accepts_exactly_the_byte_window(offset in ".{0,140}") {
+        let mut answer = AnswerInlineQuery::new(
+            "q",
+            vec![InlineQueryResult::article("1", "t", "m")],
+        );
+        answer.next_offset = Some(offset.clone());
+        prop_assert_eq!(answer.validate().is_ok(), offset.len() <= MAX_INLINE_NEXT_OFFSET_BYTES);
+    }
+
+    /// A start button validates exactly the documented ASCII parameter window.
+    #[test]
+    fn inline_start_parameter_accepts_exactly_the_documented_charset(
+        parameter in "[A-Za-z0-9_-]{0,70}"
+    ) {
+        let button = InlineQueryResultsButton::start("Go", parameter.clone());
+        prop_assert_eq!(
+            button.validate().is_ok(),
+            (1..=MAX_INLINE_START_PARAMETER_BYTES).contains(&parameter.len())
+        );
     }
 
     /// Every quiz keeps its correct answer inside the option list.

@@ -133,9 +133,9 @@ modelled; everything else is carried.
 
 | `type` | Modelled as | Members the crate models |
 | --- | --- | --- |
-| `default` | `MenuButton::Default` | `type` |
-| `commands` | `MenuButton::Commands` | `type` |
-| `web_app` | `MenuButton::WebApp` | `type`, `text`, `web_app.url`; `text` and `web_app.url` are required strings |
+| `default` | `MenuButton::Default { extra }` | `type` |
+| `commands` | `MenuButton::Commands { extra }` | `type` |
+| `web_app` | `MenuButton::WebApp { text, url, extra }` | `type`, `text`, `web_app.url`; `text` and `web_app.url` are required strings |
 | anything else | `MenuButton::Unknown(Value)` | the whole object, verbatim |
 
 Every other member of a known variant is kept in `extra` and written back
