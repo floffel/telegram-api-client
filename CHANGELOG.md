@@ -41,6 +41,15 @@ means for this API is spelled out in the README under
 
 ### Fixed
 
+- **An HTTP 5xx cannot be downgraded by a conflicting body error code** (#40).
+  `Error::from_api_body` preferred the JSON `error_code` over the HTTP status, so
+  a `502` carrying `error_code: 429` became a retryable `RateLimited` error for
+  every method, and a `502` carrying `400` became terminal instead of ambiguous
+  for a send. When the HTTP status is 5xx it now supplies the effective code;
+  the body still supplies the description, while a body-level rate-limit hint
+  is ignored. A send therefore stays `Ambiguous` and is not retried, while an
+  idempotent `get*` remains retryable. Body-only transports keep classifying
+  from `error_code` as before.
 - **Multipart serialization failures are no longer treated as JSON-only requests**
   (#37). `multipart_form()` now returns `Result<Option<MultipartForm>>` on every
   media request. `Ok(None)` still means no upload; a configured upload whose
