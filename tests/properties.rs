@@ -99,10 +99,14 @@ proptest! {
         is_member in any::<Option<bool>>(),
     ) {
         let status = ChatMemberStatus::from(status);
-        let member = ChatMember {
-            status: status.clone(),
-            is_member,
-            ..ChatMember::default()
+        let member = match &status {
+            ChatMemberStatus::Restricted => {
+                ChatMember::Restricted(telegram_api_client::ChatMemberRestricted {
+                    is_member,
+                    ..telegram_api_client::ChatMemberRestricted::default()
+                })
+            }
+            _ => ChatMember::new(status.clone(), telegram_api_client::User::default()),
         };
 
         let expected = match &status {
@@ -134,17 +138,14 @@ proptest! {
     #[test]
     fn the_restricted_flag_round_trips(
         is_member in any::<Option<bool>>(),
-        is_anonymous in any::<Option<bool>>(),
     ) {
-        let member = ChatMember {
-            status: ChatMemberStatus::Restricted,
+        let member = ChatMember::Restricted(telegram_api_client::ChatMemberRestricted {
             is_member,
-            is_anonymous,
-            ..ChatMember::default()
-        };
+            ..telegram_api_client::ChatMemberRestricted::default()
+        });
         let encoded = serde_json::to_string(&member).unwrap();
         let decoded: ChatMember = serde_json::from_str(&encoded).unwrap();
-        prop_assert_eq!(decoded.is_member, is_member);
+        prop_assert_eq!(decoded.is_member(), is_member);
         prop_assert_eq!(decoded, member, "{}", encoded);
     }
 

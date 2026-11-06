@@ -48,8 +48,9 @@ pub use callback::{
     MAX_INLINE_RESULTS, MAX_INLINE_RESULT_ID_BYTES, MAX_INLINE_START_PARAMETER_BYTES,
 };
 pub use chat::{
-    BanChatMember, ChatMember, ChatMemberPresence, GetChat, GetChatMember, PinChatMessage,
-    SendChatAction, UnpinChatMessage,
+    BanChatMember, ChatMember, ChatMemberAdministrator, ChatMemberBanned, ChatMemberLeft,
+    ChatMemberMember, ChatMemberOwner, ChatMemberPresence, ChatMemberRestricted, GetChat,
+    GetChatMember, PinChatMessage, SendChatAction, UnpinChatMessage,
 };
 pub use client::TelegramClient;
 pub use edit::{
