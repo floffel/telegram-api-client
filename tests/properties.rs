@@ -497,6 +497,35 @@ proptest! {
         prop_assert!(!error.is_ambiguous());
     }
 
+    /// A conflicting body code cannot change how a 5xx is delivered. For every
+    /// HTTP 5xx and every body code, a send is ambiguous and a read is
+    /// retryable; no body-level 429 hint survives either way.
+    #[test]
+    fn an_http_5xx_dominates_every_body_error_code(
+        suffix in "[A-Z][A-Za-z]{0,12}",
+        status in 500_u16..=599,
+        body_code in any::<i64>(),
+    ) {
+        let error = || {
+            let body = serde_json::json!({
+                "ok": false,
+                "error_code": body_code,
+                "description": "upstream failure",
+                "parameters": { "retry_after": 3 },
+            });
+            Error::from_api_body(&body, Some(status)).expect("a failed response")
+        };
+        prop_assert_eq!(error().retry_after(), None);
+
+        let send = error().classify_for("sendMessage");
+        prop_assert!(send.is_ambiguous());
+        prop_assert!(!send.is_retryable());
+
+        let read = error().classify_for(&format!("get{suffix}"));
+        prop_assert!(read.is_retryable());
+        prop_assert!(!read.is_ambiguous());
+    }
+
     /// A 429 is safe to repeat whatever the method: the server rejected before
     /// processing.
     #[test]

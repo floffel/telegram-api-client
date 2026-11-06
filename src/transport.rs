@@ -958,6 +958,44 @@ mod tests {
     }
 
     #[test]
+    fn an_http_5xx_wins_over_a_conflicting_body_code() {
+        for (status, body_code) in [(500, 429), (502, 429), (599, 400)] {
+            let body = format!(
+                r#"{{"ok":false,"error_code":{body_code},"description":"upstream failure","parameters":{{"retry_after":9}}}}"#
+            );
+            let error = decode_response(status, &body).unwrap_err();
+
+            assert!(
+                matches!(error, Error::Api { code, .. } if code == i64::from(status)),
+                "status {status} with body code {body_code}: {error:?}"
+            );
+            assert_eq!(error.retry_after(), None, "a 5xx has no retry hint");
+
+            let send = error.classify_for("sendMessage");
+            assert!(send.is_ambiguous(), "{send:?}");
+            assert!(!send.is_retryable(), "{send:?}");
+        }
+    }
+
+    #[test]
+    fn only_http_codes_500_through_599_are_5xx() {
+        let rate_limit = r#"{"ok":false,"error_code":429,"description":"Too Many Requests"}"#;
+        for status in [499, 600] {
+            let error = decode_response(status, rate_limit).unwrap_err();
+            assert!(
+                matches!(error, Error::RateLimited { .. }),
+                "status {status}: {error:?}"
+            );
+            assert!(error.is_retryable());
+        }
+
+        let bad_request = r#"{"ok":false,"error_code":400,"description":"Bad Request"}"#;
+        let error = decode_response(499, bad_request).unwrap_err();
+        assert!(matches!(error, Error::Api { code: 400, .. }), "{error:?}");
+        assert!(!error.is_retryable() && !error.is_ambiguous());
+    }
+
+    #[test]
     fn a_non_json_5xx_keeps_the_status() {
         let error = decode_response(502, "<html>bad gateway</html>").unwrap_err();
         assert!(matches!(error, Error::Api { code: 502, .. }), "{error:?}");

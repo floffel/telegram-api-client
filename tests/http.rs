@@ -109,6 +109,39 @@ async fn a_5xx_on_a_send_is_ambiguous_even_over_the_wire() {
 }
 
 #[tokio::test]
+async fn a_5xx_with_a_rate_limit_body_cannot_become_retryable() {
+    let (port, _request) = serve_once(
+        "502 Bad Gateway",
+        r#"{"ok":false,"error_code":429,"description":"Too Many Requests","parameters":{"retry_after":9}}"#,
+    );
+
+    let error = client(port)
+        .send_text(-1001_i64, "hi")
+        .await
+        .expect_err("the gateway status must win");
+
+    assert!(error.is_ambiguous(), "{error:?}");
+    assert!(!error.is_retryable(), "{error:?}");
+    assert_eq!(error.retry_after(), None);
+}
+
+#[tokio::test]
+async fn a_5xx_with_a_terminal_body_code_stays_ambiguous_for_a_send() {
+    let (port, _request) = serve_once(
+        "503 Service Unavailable",
+        r#"{"ok":false,"error_code":400,"description":"Bad Request"}"#,
+    );
+
+    let error = client(port)
+        .send_text(-1001_i64, "hi")
+        .await
+        .expect_err("the gateway status must win");
+
+    assert!(error.is_ambiguous(), "{error:?}");
+    assert!(!error.is_retryable(), "{error:?}");
+}
+
+#[tokio::test]
 async fn a_non_json_answer_is_a_payload_error() {
     let (port, _request) = serve_once("200 OK", "this is not json");
 

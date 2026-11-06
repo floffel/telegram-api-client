@@ -79,7 +79,8 @@ pub enum Error {
     /// The Bot API answered with `ok: false`.
     #[error("telegram api error {code}: {description}")]
     Api {
-        /// Numeric error code from Telegram (or the HTTP status).
+        /// Effective error code: the HTTP 5xx when one was supplied, otherwise
+        /// Telegram's body-level `error_code` or the HTTP status.
         code: i64,
         /// Human readable description.
         description: String,
@@ -436,6 +437,12 @@ impl Error {
     /// Transports use this so that every implementation maps `429`,
     /// `ok: false` and 5xx identically. Returns `None` for a successful body.
     ///
+    /// When `http_status` is a 5xx it takes precedence over the body's
+    /// `error_code`. A gateway can return its own 502 while forwarding a body
+    /// that claims 429 or 400; keeping the gateway status is what prevents a
+    /// state-changing request from being retried after it may have been
+    /// processed.
+    ///
     /// ```
     /// use telegram_api_client::Error;
     /// use serde_json::json;
@@ -449,20 +456,39 @@ impl Error {
     /// let error = Error::from_api_body(&body, Some(429)).unwrap();
     /// assert_eq!(error.retry_after(), Some(std::time::Duration::from_secs(4)));
     ///
+    /// // A 5xx gateway status wins over a conflicting body code, so a send is
+    /// // classified as ambiguous rather than retryable.
+    /// let conflicting = json!({
+    ///     "ok": false,
+    ///     "error_code": 429,
+    ///     "description": "Too Many Requests"
+    /// });
+    /// let error = Error::from_api_body(&conflicting, Some(502)).unwrap();
+    /// assert!(matches!(error, Error::Api { code: 502, .. }));
+    /// assert!(error.classify_for("sendMessage").is_ambiguous());
+    ///
     /// assert!(Error::from_api_body(&json!({"ok": true, "result": true}), Some(200)).is_none());
     /// ```
     #[must_use]
     pub fn from_api_body(body: &Value, http_status: Option<u16>) -> Option<Self> {
-        let code = body
-            .get("error_code")
-            .and_then(Value::as_i64)
-            .or_else(|| http_status.map(i64::from));
+        let body_code = body.get("error_code").and_then(Value::as_i64);
+        let server_error = http_status.is_some_and(|status| (500..=599).contains(&status));
+        // An HTTP 5xx is evidence the request may have reached the bot even if
+        // a proxy replaced or reused the response body. It therefore dominates
+        // the body's self-reported code; otherwise `error_code: 429` would turn
+        // a 502 into a retryable rate limit and `error_code: 400` would hide
+        // that the outcome is ambiguous for a send (issue #40).
+        let code = if server_error {
+            http_status.map(i64::from)
+        } else {
+            body_code.or_else(|| http_status.map(i64::from))
+        };
         let description = body
             .get("description")
             .and_then(Value::as_str)
             .map(ToString::to_string);
 
-        let is_rate_limited = code == Some(429) || http_status == Some(429);
+        let is_rate_limited = !server_error && (body_code == Some(429) || http_status == Some(429));
         if is_rate_limited {
             // A zero hint is no hint. It is the shape that says "the budget is
             // exhausted", and retrying with no wait is exactly what burns the
