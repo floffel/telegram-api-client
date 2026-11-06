@@ -253,7 +253,7 @@ let contract = UploadFile::new("Vertrag 2026.pdf", std::fs::read("contract.pdf")
     .with_mime("application/pdf");
 let request = SendDocument::new(-1001, "ignored").with_upload(contract);
 assert!(request.validate().is_ok());
-assert!(request.multipart_form().is_some());
+assert!(request.multipart_form().unwrap().is_some());
 ```
 
 * `UploadFile::from_path` reads from disk, rejecting files over 50 MB
@@ -305,7 +305,9 @@ compiling and fails loudly instead of silently dropping the file.
   `-90..=90` / `-180..=180`, album sizes in `2..=10`, poll options in `2..=12`,
   uploads within the size and MIME rules above, a `message_thread_id` that is
   set must be positive — it is a message id, so `0` and negative values name no
-  forum topic — and every `answerInlineQuery` result must be a JSON object with
+  forum topic, formatting entities must cover a positive non-empty range in
+  UTF-16 code units, `copyMessage.reply_to_message_id` must be positive when
+  set, and every `answerInlineQuery` result must be a JSON object with
   a non-empty `type` and a unique 1-64 byte `id` (`MAX_INLINE_RESULT_ID_BYTES`,
   counted in bytes; `InlineQueryResult::validate` checks one result, the answer
   checks the whole array and names the offending index). Violations are

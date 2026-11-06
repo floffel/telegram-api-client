@@ -9,7 +9,7 @@
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Map, Value};
 
 use crate::error::{Error, Result};
 use crate::transport::{MultipartFile, MultipartForm};
@@ -107,6 +107,59 @@ pub(crate) fn validate_text(field: &'static str, value: &str, max: usize) -> Res
             field,
             reason: format!("must be at most {max} UTF-16 code units, got {units}"),
         });
+    }
+    Ok(())
+}
+
+/// Rejects formatting entities whose UTF-16 ranges cannot address `text`.
+pub(crate) fn validate_entities(
+    field: &'static str,
+    entities: &[MessageEntity],
+    text: &str,
+) -> Result<()> {
+    let text_len = text.encode_utf16().count();
+    for (index, entity) in entities.iter().enumerate() {
+        if entity.offset < 0 {
+            return Err(Error::InvalidRequest {
+                field,
+                reason: format!(
+                    "{field}[{index}].offset must be non-negative, got {}",
+                    entity.offset
+                ),
+            });
+        }
+        if entity.length <= 0 {
+            return Err(Error::InvalidRequest {
+                field,
+                reason: format!(
+                    "{field}[{index}].length must be positive, got {}",
+                    entity.length
+                ),
+            });
+        }
+        let end =
+            entity
+                .offset
+                .checked_add(entity.length)
+                .ok_or_else(|| Error::InvalidRequest {
+                    field,
+                    reason: format!(
+                        "{field}[{index}] range overflows: offset {} + length {}",
+                        entity.offset, entity.length
+                    ),
+                })?;
+        match usize::try_from(end) {
+            Ok(end) if end <= text_len => {}
+            _ => {
+                return Err(Error::InvalidRequest {
+                    field,
+                    reason: format!(
+                        "{field}[{index}] range {}..{end} exceeds {text_len} UTF-16 code units",
+                        entity.offset
+                    ),
+                });
+            }
+        }
     }
     Ok(())
 }
@@ -514,17 +567,42 @@ pub fn guess_mime(filename: &str) -> &'static str {
     }
 }
 
-/// Converts a serialized request into a multipart form, dropping the reference
+/// Serializes a request into the object a multipart form is built from.
+///
+/// Unlike a field-by-field conversion, this keeps the original serde failure so
+/// a caller never mistakes a broken body for "no upload".
+pub(crate) fn serialized_multipart_object<T: Serialize + ?Sized>(
+    request: &T,
+    operation: &str,
+) -> Result<Map<String, Value>> {
+    let body = serde_json::to_value(request).map_err(|error| Error::Payload {
+        message: format!("cannot serialize {operation} multipart body: {error}"),
+        source: Some(error),
+    })?;
+    match body {
+        Value::Object(map) => Ok(map),
+        other => Err(Error::Payload {
+            message: format!(
+                "cannot serialize {operation} multipart body: expected an object, got {other}"
+            ),
+            source: None,
+        }),
+    }
+}
+
+/// Converts serialized fields into a multipart form, dropping the reference
 /// field that the file part replaces.
-pub(crate) fn form_with_file(body: Value, param: &str, file: &UploadFile) -> MultipartForm {
+pub(crate) fn form_with_file(
+    map: Map<String, Value>,
+    param: &str,
+    file: &UploadFile,
+) -> MultipartForm {
     let mut form = MultipartForm::new();
-    if let Value::Object(map) = body {
-        for (key, value) in map {
-            if key == param {
-                continue;
-            }
-            form = form.field(key, text_field(&value));
+    for (key, value) in map {
+        if key == param {
+            continue;
         }
+        form = form.field(key, text_field(&value));
     }
     form.with_file(file.to_part(param))
 }
@@ -534,6 +612,23 @@ pub(crate) fn text_field(value: &Value) -> String {
     match value {
         Value::String(text) => text.clone(),
         other => other.to_string(),
+    }
+}
+
+/// A serializer that always fails, used to prove multipart errors are not
+/// collapsed into "no upload".
+#[cfg(test)]
+pub(crate) struct AlwaysFails;
+
+#[cfg(test)]
+impl Serialize for AlwaysFails {
+    fn serialize<S>(&self, _serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        Err(serde::ser::Error::custom(
+            "deliberate serialization failure",
+        ))
     }
 }
 
@@ -808,8 +903,11 @@ impl MediaOptions {
     pub fn validate(&self) -> Result<()> {
         self.delivery.validate()?;
         match self.caption.as_deref() {
-            None => Ok(()),
-            Some(caption) => validate_text("caption", caption, MAX_CAPTION),
+            None => validate_entities("caption_entities", &self.caption_entities, ""),
+            Some(caption) => {
+                validate_text("caption", caption, MAX_CAPTION)?;
+                validate_entities("caption_entities", &self.caption_entities, caption)
+            }
         }
     }
 }
@@ -900,7 +998,8 @@ impl SendMessage {
     pub fn validate(&self) -> Result<()> {
         validate_chat("chat_id", &self.chat_id)?;
         validate_text("text", &self.text, MAX_MESSAGE_TEXT)?;
-        self.options.validate()
+        self.options.validate()?;
+        validate_entities("entities", &self.options.entities, &self.text)
     }
 }
 
@@ -991,7 +1090,7 @@ macro_rules! media_send {
                 "\n",
                 "let request = ", stringify!($name), "::new(1, \"file-id\")\n",
                 "    .with_upload(UploadFile::new(\"a.bin\", vec![1, 2, 3]));\n",
-                "let form = request.multipart_form().unwrap();\n",
+                "let form = request.multipart_form().unwrap().unwrap();\n",
                 "assert_eq!(form.files()[0].field, \"", stringify!($field), "\");\n",
                 "```\n",
             )]
@@ -1002,8 +1101,18 @@ macro_rules! media_send {
                 self
             }
 
-            /// The multipart body for this request, or `None` when no upload was
-            /// configured and the request is plain JSON.
+            /// The multipart body for this request, with serialization failures
+            /// kept as typed errors.
+            ///
+            /// This is the method the client uses. `Ok(None)` means no upload
+            /// was configured and the request is plain JSON; an upload that
+            /// cannot be serialized returns [`Error::Payload`] with the serde
+            /// failure as its source.
+            ///
+            /// # Errors
+            ///
+            /// [`Error::Payload`] when an upload was configured but the request
+            /// could not be serialized as a JSON object.
             ///
             /// ```no_run
             /// # use telegram_api_client::UploadFile;
@@ -1011,17 +1120,18 @@ macro_rules! media_send {
             /// # fn demo() {
             /// let upload = UploadFile::from_path("photo.png").unwrap();
             /// let request = SendPhoto::new(1, "ignored").with_upload(upload);
-            /// assert!(request.multipart_form().is_some());
+            /// assert!(request.multipart_form().unwrap().is_some());
             ///
             /// let json_only = SendPhoto::new(1, "AgACAgI");
-            /// assert!(json_only.multipart_form().is_none());
+            /// assert!(json_only.multipart_form().unwrap().is_none());
             /// # }
             /// ```
-            #[must_use]
-            pub fn multipart_form(&self) -> Option<MultipartForm> {
-                let upload = self.upload.as_ref()?;
-                let body = serde_json::to_value(self).ok()?;
-                Some(form_with_file(body, stringify!($field), upload))
+            pub fn multipart_form(&self) -> Result<Option<MultipartForm>> {
+                let Some(upload) = self.upload.as_ref() else {
+                    return Ok(None);
+                };
+                let body = serialized_multipart_object(self, stringify!($name))?;
+                Ok(Some(form_with_file(body, stringify!($field), upload)))
             }
 
             /// Checks chat, media reference or upload, caption and delivery
@@ -1068,6 +1178,23 @@ media_send! {
     "A photo, referenced by `file_id` or URL."
     accepts: &["image/"],
     limit: MAX_PHOTO_BYTES
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn multipart_serialization_failures_keep_the_serde_source() {
+        let error = serialized_multipart_object(&AlwaysFails, "testMethod").unwrap_err();
+        match error {
+            Error::Payload { message, source } => {
+                assert!(message.contains("testMethod"), "{message}");
+                assert!(source.is_some(), "the serde failure must be kept");
+            }
+            other => panic!("expected Error::Payload, got {other:?}"),
+        }
+    }
 }
 
 media_send! {
@@ -1241,12 +1368,26 @@ impl SendMediaGroup {
             if let Some(caption) = item.caption.as_deref() {
                 validate_text("caption", caption, MAX_CAPTION)?;
             }
+            validate_entities(
+                "caption_entities",
+                &item.caption_entities,
+                item.caption.as_deref().unwrap_or(""),
+            )?;
         }
         self.delivery.validate()
     }
 
-    /// The multipart body for this album, or `None` when every item is
-    /// referenced by `file_id`/URL.
+    /// The multipart body for this album, with serialization failures kept as
+    /// typed errors.
+    ///
+    /// `Ok(None)` means every item is referenced by `file_id`/URL. Once any
+    /// item carries an upload, a serialization failure is returned instead of
+    /// being collapsed into the no-upload case.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Payload`] when at least one item carries an upload but the
+    /// request could not be serialized as a JSON object.
     ///
     /// Uploaded items are attached as `file0`, `file1`, … and referenced from
     /// the `media` array as `attach://file0`, exactly as the Bot API expects.
@@ -1263,7 +1404,7 @@ impl SendMediaGroup {
     /// );
     /// assert!(album.validate().is_ok());
     ///
-    /// let form = album.multipart_form().unwrap();
+    /// let form = album.multipart_form().unwrap().unwrap();
     /// assert_eq!(form.files().len(), 1);
     /// assert_eq!(form.files()[0].field, "file1");
     /// assert!(form
@@ -1272,15 +1413,11 @@ impl SendMediaGroup {
     ///     .unwrap()
     ///     .contains("attach://file1"));
     /// ```
-    #[must_use]
-    pub fn multipart_form(&self) -> Option<MultipartForm> {
+    pub fn multipart_form(&self) -> Result<Option<MultipartForm>> {
         if !self.media.iter().any(|item| item.upload.is_some()) {
-            return None;
+            return Ok(None);
         }
-        let body = serde_json::to_value(self).ok()?;
-        let Value::Object(map) = body else {
-            return None;
-        };
+        let map = serialized_multipart_object(self, "SendMediaGroup")?;
 
         let mut form = MultipartForm::new();
         for (key, value) in map {
@@ -1313,7 +1450,7 @@ impl SendMediaGroup {
             }
             form = form.field(key, text_field(&value));
         }
-        Some(form)
+        Ok(Some(form))
     }
 }
 

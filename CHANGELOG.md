@@ -41,6 +41,19 @@ means for this API is spelled out in the README under
 
 ### Fixed
 
+- **Multipart serialization failures are no longer treated as JSON-only requests**
+  (#37). `multipart_form()` now returns `Result<Option<MultipartForm>>` on every
+  media request. `Ok(None)` still means no upload; a configured upload whose
+  body cannot be serialized is `Error::Payload` with the serde failure as its
+  source, and the client never falls back to posting JSON without the file.
+- **Formatting entities are range-checked against their UTF-16 text** (#38).
+  `sendMessage`, media captions and albums, `editMessageText`,
+  `editMessageCaption`, `editMessageMedia` and `copyMessage` now reject negative
+  offsets, non-positive lengths, overflowing ranges and ranges past the text or
+  caption before a request reaches the transport.
+- **`copyMessage` reply targets must be positive when present** (#39). A zero or
+  negative `reply_to_message_id` is rejected locally instead of costing a round
+  trip to Telegram. Both validation fixes include boundary and property tests.
 - **Inline query results are validated structurally** (#21). `answerInlineQuery`
   only counted `results`, so a `null` entry, a result without `type` or `id`, an
   id longer than the documented 64 bytes and two results sharing one id all

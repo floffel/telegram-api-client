@@ -282,6 +282,7 @@ fn a_unicode_filename_survives_encoding() {
     let form = SendPhoto::new(CHAT, "x")
         .with_upload(upload)
         .multipart_form()
+        .expect("serialization succeeds")
         .expect("multipart form");
     let body = String::from_utf8(form.encode("BOUNDARY")).expect("utf8 body");
 
