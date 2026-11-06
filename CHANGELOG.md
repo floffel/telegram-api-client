@@ -10,6 +10,27 @@ means for this API is spelled out in the README under
 
 ### Changed
 
+- **`ChatMember` keeps the data its status carries** (#25). The type modelled
+  only `status`, `user` and `is_anonymous`, so serde silently dropped everything
+  else Telegram sends — the `can_*` rights, `is_member`, `until_date`,
+  `custom_title`, `tag` — and a member could not be serialised back with the
+  state it arrived with. `ChatMember` is now a status-tagged enum with one
+  variant per documented member type (`ChatMember::Creator`, `Administrator`,
+  `Member`, `Restricted`, `Left`, `Banned`) wrapping the payload struct of the
+  same name, so the fields of a status are typed and reachable. Every shape has
+  an `extra` map for a field a later Bot API adds, and an unmodelled `status` is
+  carried as `ChatMember::Unknown` with its user and payload, so a
+  decode/serialise round trip drops nothing. Accessors answer the common
+  questions without a match — `status()`, `user()`, `is_anonymous()`,
+  `custom_title()`, `until_date()`, `is_member()`, `presence()` and
+  `is_present()` — and `ChatMember::new(status, user)` builds one. `status` and
+  `user` stay the only required members (#26); an absent mandatory right reads
+  as `false`, an absent optional one as `None`, an absent restricted
+  `is_member` remains distinct from explicit `false`, and `until_date: 0` stays
+  the API's "forever". **Breaking** for callers that read the fields
+  (`member.user` is now `member.user()`) or build the struct literally (use
+  `ChatMember::new` or the payload structs).
+
 - **`File` now requires valid identifiers and preserves future fields** (#51,
   #54, #53). `file_id` and `file_unique_id` were marked `serde(default)`, so an
   empty or truncated `getFile` result decoded into a fabricated empty file.
