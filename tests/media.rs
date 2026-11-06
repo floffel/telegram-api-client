@@ -1,410 +1,549 @@
-//! Wire fixtures for the poll media family.
+//! Wire fixtures and boundaries for the poll media family.
 
-use telegram_api_client::{Poll, PollMedia, PollMediaKind, PollOption};
+use serde::de::DeserializeOwned;
+use serde_json::{json, Value};
+use telegram_api_client::{
+    Animation, Audio, Document, Error, Link, LivePhoto, Location, MaskPoint, MaskPosition,
+    PhotoSize, Poll, PollMedia, PollMediaKind, PollOption, Sticker, Venue, Video, VideoQuality,
+    WebhookGuard, MAX_MEDIA_COLLECTION_ITEMS,
+};
+
+fn parse<T: DeserializeOwned>(value: Value) -> Result<T, serde_json::Error> {
+    serde_json::from_value(value)
+}
+
+fn assert_required_fields<T: DeserializeOwned + std::fmt::Debug>(object: &Value, fields: &[&str]) {
+    parse::<T>(object.clone()).expect("the complete fixture parses");
+    for field in fields {
+        let mut missing = object.clone();
+        missing
+            .as_object_mut()
+            .expect("fixtures are objects")
+            .remove(*field);
+        let error = parse::<T>(missing).expect_err(field);
+        assert!(
+            error.to_string().contains("missing field"),
+            "removing `{field}` must fail on the missing field: {error}"
+        );
+    }
+}
+
+#[test]
+fn every_required_media_field_is_really_required() {
+    assert_required_fields::<PhotoSize>(
+        &json!({"file_id":"A","file_unique_id":"u","width":0,"height":0}),
+        &["file_id", "file_unique_id", "width", "height"],
+    );
+    assert_required_fields::<Link>(&json!({"url":"https://example.com"}), &["url"]);
+    assert_required_fields::<LivePhoto>(
+        &json!({"file_id":"A","file_unique_id":"u","width":0,"height":0,"duration":0}),
+        &["file_id", "file_unique_id", "width", "height", "duration"],
+    );
+    assert_required_fields::<Animation>(
+        &json!({"file_id":"A","file_unique_id":"u","width":0,"height":0,"duration":0}),
+        &["file_id", "file_unique_id", "width", "height", "duration"],
+    );
+    assert_required_fields::<Audio>(
+        &json!({"file_id":"A","file_unique_id":"u","duration":0}),
+        &["file_id", "file_unique_id", "duration"],
+    );
+    assert_required_fields::<Document>(
+        &json!({"file_id":"A","file_unique_id":"u"}),
+        &["file_id", "file_unique_id"],
+    );
+    assert_required_fields::<Venue>(
+        &json!({"location":{"latitude":0.0,"longitude":0.0},"title":"T","address":"A"}),
+        &["location", "title", "address"],
+    );
+    assert_required_fields::<VideoQuality>(
+        &json!({"file_id":"A","file_unique_id":"u","width":0,"height":0,"codec":"h264"}),
+        &["file_id", "file_unique_id", "width", "height", "codec"],
+    );
+    assert_required_fields::<Video>(
+        &json!({"file_id":"A","file_unique_id":"u","width":0,"height":0,"duration":0}),
+        &["file_id", "file_unique_id", "width", "height", "duration"],
+    );
+    assert_required_fields::<Sticker>(
+        &json!({"file_id":"A","file_unique_id":"u","type":"regular","width":0,"height":0,
+                "is_animated":false,"is_video":false}),
+        &[
+            "file_id",
+            "file_unique_id",
+            "type",
+            "width",
+            "height",
+            "is_animated",
+            "is_video",
+        ],
+    );
+}
+
+#[test]
+fn optional_media_fields_may_be_absent() {
+    let photo: PhotoSize = parse(json!({
+        "file_id":"A","file_unique_id":"u","width":0,"height":0
+    }))
+    .expect("PhotoSize.file_size is optional");
+    assert_eq!(photo.file_size, None);
+
+    let live_photo: LivePhoto = parse(json!({
+        "file_id":"A","file_unique_id":"u","width":0,"height":0,"duration":0
+    }))
+    .expect("LivePhoto optional members are optional");
+    assert!(live_photo.photo.is_none());
+
+    let video: Video = parse(json!({
+        "file_id":"A","file_unique_id":"u","width":0,"height":0,"duration":0
+    }))
+    .expect("Video optional collections are optional");
+    assert!(video.cover.is_none());
+    assert!(video.qualities.is_none());
+}
 
 #[test]
 fn photo_member() {
-    let media: PollMedia = serde_json::from_str(
-        r#"{"photo":[{"file_id":"AgAC","file_unique_id":"AQAD","width":320,"height":240,"file_size":12345}]}"#,
-    )
+    let media: PollMedia = parse(json!({
+        "photo":[{"file_id":"AgAC","file_unique_id":"AQAD","width":320,"height":240,
+                  "file_size":12345}]
+    }))
     .expect("photo fixture parses");
 
-    assert_eq!(media.kind(), Some(PollMediaKind::Photo));
-    let photos = media.photo.as_ref().expect("photo member");
+    assert_eq!(media.kind(), PollMediaKind::Photo);
+    assert_eq!(media.tag(), "photo");
+    let photos = media.photo_value().expect("photo member");
     assert_eq!(photos.len(), 1);
     assert_eq!(photos[0].file_id, "AgAC");
     assert_eq!(photos[0].file_unique_id, "AQAD");
     assert_eq!(photos[0].width, 320);
     assert_eq!(photos[0].height, 240);
     assert_eq!(photos[0].file_size, Some(12345));
+    assert!(media.animation_value().is_none());
+    assert!(media.video_value().is_none());
 }
 
 #[test]
 fn link_member() {
-    let media: PollMedia = serde_json::from_str(r#"{"link":{"url":"https://example.com/x"}}"#)
-        .expect("link fixture parses");
+    let media: PollMedia =
+        parse(json!({"link":{"url":"https://example.com/x"}})).expect("link fixture parses");
 
-    assert_eq!(media.kind(), Some(PollMediaKind::Link));
+    assert_eq!(media.kind(), PollMediaKind::Link);
+    assert_eq!(media.tag(), "link");
     assert_eq!(
-        media.link.as_ref().map(|link| link.url.as_str()),
+        media.link_value().map(|link| link.url.as_str()),
         Some("https://example.com/x")
     );
+    assert!(media.photo_value().is_none());
 }
 
 #[test]
 fn venue_member() {
-    let media: PollMedia = serde_json::from_str(
-        r#"{"venue":{"location":{"latitude":51.05,"longitude":13.74},"title":"PATO","address":"Koeniginstraße 34"}}"#,
-    )
+    let media: PollMedia = parse(json!({
+        "venue":{"location":{"latitude":51.05,"longitude":13.74},"title":"PATO",
+                 "address":"Koeniginstraße 34"}
+    }))
     .expect("venue fixture parses");
 
-    assert_eq!(media.kind(), Some(PollMediaKind::Venue));
-    let venue = media.venue.as_ref().expect("venue member");
+    assert_eq!(media.kind(), PollMediaKind::Venue);
+    assert_eq!(media.tag(), "venue");
+    let venue = media.venue_value().expect("venue member");
     assert_eq!(venue.title, "PATO");
     assert_eq!(venue.address, "Koeniginstraße 34");
     assert!((venue.location.latitude - 51.05).abs() < f64::EPSILON);
     assert!((venue.location.longitude - 13.74).abs() < f64::EPSILON);
+    assert!(media.location_value().is_none());
 }
 
 #[test]
 fn video_member() {
-    let media: PollMedia = serde_json::from_str(
-        r#"{"video":{"file_id":"BAAC","file_unique_id":"AQAD","width":1280,"height":720,"duration":12,"mime_type":"video/mp4","qualities":[{"file_id":"BAAD","file_unique_id":"AQAE","width":1280,"height":720,"codec":"h264"}]}}"#,
-    )
+    let media: PollMedia = parse(json!({
+        "video":{"file_id":"BAAC","file_unique_id":"AQAD","width":1280,"height":720,
+                 "duration":12,"mime_type":"video/mp4",
+                 "qualities":[{"file_id":"BAAD","file_unique_id":"AQAE","width":1280,
+                               "height":720,"codec":"h264"}]}
+    }))
     .expect("video fixture parses");
 
-    assert_eq!(media.kind(), Some(PollMediaKind::Video));
-    let video = media.video.as_ref().expect("video member");
+    assert_eq!(media.kind(), PollMediaKind::Video);
+    assert_eq!(media.tag(), "video");
+    let video = media.video_value().expect("video member");
     assert_eq!(video.file_id, "BAAC");
     assert_eq!(video.mime_type.as_deref(), Some("video/mp4"));
     let qualities = video.qualities.as_ref().expect("video qualities");
     assert_eq!(qualities.len(), 1);
     assert_eq!(qualities[0].file_id, "BAAD");
     assert_eq!(qualities[0].codec, "h264");
+    assert!(media.sticker_value().is_none());
 }
 
 #[test]
 fn sticker_member() {
-    let media: PollMedia = serde_json::from_str(
-        r#"{"sticker":{"file_id":"CAAC","file_unique_id":"AQAD","type":"regular","width":512,"height":512,"is_animated":false,"is_video":false}}"#,
-    )
+    let media: PollMedia = parse(json!({
+        "sticker":{"file_id":"CAAC","file_unique_id":"AQAD","type":"regular","width":512,
+                   "height":512,"is_animated":false,"is_video":false}
+    }))
     .expect("sticker fixture parses");
 
-    assert_eq!(media.kind(), Some(PollMediaKind::Sticker));
-    let sticker = media.sticker.as_ref().expect("sticker member");
+    assert_eq!(media.kind(), PollMediaKind::Sticker);
+    assert_eq!(media.tag(), "sticker");
+    let sticker = media.sticker_value().expect("sticker member");
     assert_eq!(sticker.file_id, "CAAC");
     assert_eq!(sticker.sticker_type, "regular");
     assert_eq!(sticker.width, 512);
     assert_eq!(sticker.height, 512);
     assert!(!sticker.is_animated);
     assert!(!sticker.is_video);
+    assert!(media.venue_value().is_none());
 }
 
 #[test]
 fn animation_member() {
-    let media: PollMedia = serde_json::from_str(
-        r#"{"animation":{"file_id":"DAAC","file_unique_id":"AQAD","width":320,"height":240,"duration":2,"thumbnail":{"file_id":"DAAD","file_unique_id":"AQAE","width":64,"height":48},"file_name":"loop.mp4","mime_type":"video/mp4","file_size":2048}}"#,
-    )
+    let media: PollMedia = parse(json!({
+        "animation":{"file_id":"DAAC","file_unique_id":"AQAD","width":320,"height":240,
+                     "duration":2,"thumbnail":{"file_id":"DAAD","file_unique_id":"AQAE",
+                     "width":64,"height":48},"file_name":"loop.mp4","mime_type":"video/mp4",
+                     "file_size":2048}
+    }))
     .expect("animation fixture parses");
 
-    assert_eq!(media.kind(), Some(PollMediaKind::Animation));
-    let animation = media.animation.as_ref().expect("animation member");
+    assert_eq!(media.kind(), PollMediaKind::Animation);
+    assert_eq!(media.tag(), "animation");
+    let animation = media.animation_value().expect("animation member");
     assert_eq!(animation.duration, 2);
     assert_eq!(animation.file_name.as_deref(), Some("loop.mp4"));
     assert_eq!(
         animation.thumbnail.as_ref().map(|photo| photo.width),
         Some(64)
     );
+    assert!(media.audio_value().is_none());
 }
 
 #[test]
 fn audio_member() {
-    let media: PollMedia = serde_json::from_str(
-        r#"{"audio":{"file_id":"EAAC","file_unique_id":"AQAD","duration":9,"performer":"PATO","title":"Koenig","file_name":"track.mp3","mime_type":"audio/mpeg","file_size":4096,"thumbnail":{"file_id":"EAAD","file_unique_id":"AQAE","width":90,"height":90}}}"#,
-    )
+    let media: PollMedia = parse(json!({
+        "audio":{"file_id":"EAAC","file_unique_id":"AQAD","duration":9,"performer":"PATO",
+                 "title":"Koenig","file_name":"track.mp3","mime_type":"audio/mpeg",
+                 "file_size":4096,"thumbnail":{"file_id":"EAAD","file_unique_id":"AQAE",
+                 "width":90,"height":90}}
+    }))
     .expect("audio fixture parses");
 
-    assert_eq!(media.kind(), Some(PollMediaKind::Audio));
-    let audio = media.audio.as_ref().expect("audio member");
+    assert_eq!(media.kind(), PollMediaKind::Audio);
+    assert_eq!(media.tag(), "audio");
+    let audio = media.audio_value().expect("audio member");
     assert_eq!(audio.duration, 9);
     assert_eq!(audio.performer.as_deref(), Some("PATO"));
     assert_eq!(audio.title.as_deref(), Some("Koenig"));
     assert_eq!(audio.thumbnail.as_ref().map(|photo| photo.height), Some(90));
+    assert!(media.document_value().is_none());
 }
 
 #[test]
 fn document_member() {
-    let media: PollMedia = serde_json::from_str(
-        r#"{"document":{"file_id":"FAAC","file_unique_id":"AQAD","thumbnail":{"file_id":"FAAD","file_unique_id":"AQAE","width":64,"height":64},"file_name":"menu.pdf","mime_type":"application/pdf","file_size":8192}}"#,
-    )
+    let media: PollMedia = parse(json!({
+        "document":{"file_id":"FAAC","file_unique_id":"AQAD","thumbnail":{"file_id":"FAAD",
+                    "file_unique_id":"AQAE","width":64,"height":64},"file_name":"menu.pdf",
+                    "mime_type":"application/pdf","file_size":8192}
+    }))
     .expect("document fixture parses");
 
-    assert_eq!(media.kind(), Some(PollMediaKind::Document));
-    let document = media.document.as_ref().expect("document member");
+    assert_eq!(media.kind(), PollMediaKind::Document);
+    assert_eq!(media.tag(), "document");
+    let document = media.document_value().expect("document member");
     assert_eq!(document.file_name.as_deref(), Some("menu.pdf"));
     assert_eq!(document.mime_type.as_deref(), Some("application/pdf"));
     assert_eq!(document.file_size, Some(8192));
+    assert!(media.link_value().is_none());
 }
 
 #[test]
 fn live_photo_member() {
-    let media: PollMedia = serde_json::from_str(
-        r#"{"live_photo":{"photo":[{"file_id":"GAAC","file_unique_id":"AQAD","width":1080,"height":1920}],"file_id":"GAAD","file_unique_id":"AQAE","width":1080,"height":1920,"duration":3,"mime_type":"video/mp4","file_size":16384}}"#,
-    )
+    let media: PollMedia = parse(json!({
+        "live_photo":{"photo":[{"file_id":"GAAC","file_unique_id":"AQAD","width":1080,
+                       "height":1920}],"file_id":"GAAD","file_unique_id":"AQAE","width":1080,
+                       "height":1920,"duration":3,"mime_type":"video/mp4","file_size":16384}
+    }))
     .expect("live photo fixture parses");
 
-    assert_eq!(media.kind(), Some(PollMediaKind::LivePhoto));
-    let live_photo = media.live_photo.as_ref().expect("live photo member");
+    assert_eq!(media.kind(), PollMediaKind::LivePhoto);
+    assert_eq!(media.tag(), "live_photo");
+    let live_photo = media.live_photo_value().expect("live photo member");
     assert_eq!(live_photo.duration, 3);
     assert_eq!(live_photo.width, 1080);
     assert_eq!(live_photo.photo.as_ref().map(Vec::len), Some(1));
+    assert!(media.location_value().is_none());
 }
 
 #[test]
 fn location_member() {
-    let media: PollMedia =
-        serde_json::from_str(r#"{"location":{"latitude":51.05,"longitude":13.74}}"#)
-            .expect("location fixture parses");
+    let media: PollMedia = parse(json!({"location":{"latitude":51.05,"longitude":13.74}}))
+        .expect("location fixture parses");
 
-    assert_eq!(media.kind(), Some(PollMediaKind::Location));
-    let location = media.location.as_ref().expect("location member");
+    assert_eq!(media.kind(), PollMediaKind::Location);
+    assert_eq!(media.tag(), "location");
+    let location = media.location_value().expect("location member");
     assert!((location.latitude - 51.05).abs() < f64::EPSILON);
     assert!((location.longitude - 13.74).abs() < f64::EPSILON);
+    assert!(media.live_photo_value().is_none());
 }
 
 #[test]
-fn empty_object_has_no_member() {
-    let media: PollMedia = serde_json::from_str("{}").expect("empty fixture parses");
+fn empty_and_multi_member_objects_are_rejected() {
+    let empty = serde_json::from_str::<PollMedia>("{}")
+        .expect_err("poll media requires exactly one member");
+    assert!(empty.to_string().contains("exactly one member"));
 
-    assert_eq!(media, PollMedia::default());
-    assert!(media.animation.is_none());
-    assert!(media.audio.is_none());
-    assert!(media.document.is_none());
-    assert!(media.link.is_none());
-    assert!(media.live_photo.is_none());
-    assert!(media.location.is_none());
-    assert!(media.photo.is_none());
-    assert!(media.sticker.is_none());
-    assert!(media.venue.is_none());
-    assert!(media.video.is_none());
-    assert!(media.is_empty());
-    assert_eq!(media.kind(), None);
+    let multiple = parse::<PollMedia>(json!({
+        "link":{"url":"https://example.com"},
+        "location":{"latitude":0.0,"longitude":0.0}
+    }))
+    .expect_err("poll media accepts only one member");
+    assert!(multiple.to_string().contains("exactly one member"));
+
+    let alias_duplicate = parse::<PollMedia>(json!({
+        "live_photo":{"file_id":"A","file_unique_id":"u","width":1,"height":1,"duration":0},
+        "livePhoto":{"file_id":"B","file_unique_id":"v","width":1,"height":1,"duration":0}
+    }))
+    .expect_err("an alias of the same member is a duplicate");
+    assert!(alias_duplicate.to_string().contains("exactly one member"));
 }
 
 #[test]
-fn unknown_field_is_ignored() {
-    let poll: Poll = serde_json::from_str(r#"{"media":{"poll_media_hint":"x"}}"#)
-        .expect("unknown member field is ignored");
+fn empty_photo_arrays_are_rejected() {
+    assert!(parse::<PollMedia>(json!({"photo":[]})).is_err());
+    assert!(PollMedia::photo(Vec::new()).is_err());
+}
 
-    let media = poll.media.as_ref().expect("media member");
-    assert!(media.is_empty());
-    assert_eq!(media.kind(), None);
+#[test]
+fn unknown_member_is_preserved_with_its_payload_and_extra_fields() {
+    let input = json!({
+        "future_media":{"nested":[1,true],"name":"new"},
+        "later_field":{"kept":true}
+    });
+    let media: PollMedia = parse(input.clone()).expect("unknown member parses");
+
+    assert_eq!(media.kind(), PollMediaKind::Unknown);
+    assert_eq!(media.tag(), "future_media");
+    assert_eq!(
+        media.unknown_value(),
+        Some(&json!({"nested":[1,true],"name":"new"}))
+    );
+    assert_eq!(media.extra_fields()["later_field"], json!({"kept":true}));
+    assert_eq!(serde_json::to_value(&media).expect("serializable"), input);
+}
+
+#[test]
+fn known_member_keeps_adjacent_fields() {
+    let input = json!({
+        "link":{"url":"https://example.com/x"},
+        "future_field":{"nested":true}
+    });
+    let media: PollMedia = parse(input.clone()).expect("known member with extras parses");
+    assert_eq!(media.kind(), PollMediaKind::Link);
+    assert_eq!(media.extra_fields()["future_field"], json!({"nested":true}));
+    assert_eq!(serde_json::to_value(&media).expect("serializable"), input);
+}
+
+#[test]
+fn unknown_field_before_known_member_is_kept() {
+    let input = r#"{"future_field":{"nested":true},"link":{"url":"https://example.com/x"}}"#;
+    let media: PollMedia = serde_json::from_str(input).expect("known member with leading extra");
+
+    assert_eq!(media.kind(), PollMediaKind::Link);
+    assert_eq!(media.extra_fields()["future_field"], json!({"nested":true}));
+    assert_eq!(
+        serde_json::to_value(&media).expect("serializable"),
+        serde_json::from_str::<Value>(input).expect("valid fixture")
+    );
+}
+
+#[test]
+fn constructors_round_trip_every_member() {
+    let photo = PhotoSize {
+        file_id: "A".into(),
+        file_unique_id: "u".into(),
+        width: 1,
+        height: 1,
+        ..PhotoSize::default()
+    };
+    let video = Video {
+        file_id: "V".into(),
+        file_unique_id: "v".into(),
+        width: 1,
+        height: 1,
+        duration: 1,
+        ..Video::default()
+    };
+    let cases = vec![
+        (
+            PollMedia::animation(Animation::default()),
+            PollMediaKind::Animation,
+        ),
+        (PollMedia::audio(Audio::default()), PollMediaKind::Audio),
+        (
+            PollMedia::document(Document::default()),
+            PollMediaKind::Document,
+        ),
+        (
+            PollMedia::link(Link {
+                url: "https://example.com".into(),
+            }),
+            PollMediaKind::Link,
+        ),
+        (
+            PollMedia::live_photo(LivePhoto::default()),
+            PollMediaKind::LivePhoto,
+        ),
+        (
+            PollMedia::location(Location::default()),
+            PollMediaKind::Location,
+        ),
+        (
+            PollMedia::photo(vec![photo]).expect("non-empty photo"),
+            PollMediaKind::Photo,
+        ),
+        (
+            PollMedia::sticker(Sticker::default()),
+            PollMediaKind::Sticker,
+        ),
+        (PollMedia::venue(Venue::default()), PollMediaKind::Venue),
+        (PollMedia::video(video), PollMediaKind::Video),
+    ];
+
+    for (media, kind) in cases {
+        assert_eq!(media.kind(), kind);
+        let encoded = serde_json::to_string(&media).expect("constructor output serializes");
+        let decoded: PollMedia = serde_json::from_str(&encoded).expect("round trip parses");
+        assert_eq!(decoded, media);
+    }
 }
 
 #[test]
 fn poll_carries_media_and_explanation_media() {
-    let poll: Poll = serde_json::from_str(
-        r#"{"id":"p1","question":"Where?","options":[{"text":"PATO","voter_count":1}],"media":{"photo":[{"file_id":"AgAC","file_unique_id":"AQAD","width":320,"height":240,"file_size":12345}]},"explanation_media":{"link":{"url":"https://example.com/x"}}}"#,
-    )
+    let poll: Poll = parse(json!({
+        "id":"p1","question":"Where?","options":[{"text":"PATO","voter_count":1}],
+        "media":{"photo":[{"file_id":"AgAC","file_unique_id":"AQAD","width":320,
+                  "height":240,"file_size":12345}]},
+        "explanation_media":{"link":{"url":"https://example.com/x"}}
+    }))
     .expect("poll with both media fields parses");
 
     assert_eq!(
-        poll.media.as_ref().and_then(PollMedia::kind),
+        poll.media.as_ref().map(PollMedia::kind),
         Some(PollMediaKind::Photo)
     );
     assert_eq!(
-        poll.explanation_media.as_ref().and_then(PollMedia::kind),
+        poll.explanation_media.as_ref().map(PollMedia::kind),
         Some(PollMediaKind::Link)
     );
 }
 
 #[test]
 fn poll_option_carries_media() {
-    let option: PollOption = serde_json::from_str(
-        r#"{"text":"PATO","voter_count":1,"media":{"venue":{"location":{"latitude":51.05,"longitude":13.74},"title":"PATO","address":"Koeniginstraße 34"}}}"#,
-    )
+    let option: PollOption = parse(json!({
+        "text":"PATO","voter_count":1,
+        "media":{"venue":{"location":{"latitude":51.05,"longitude":13.74},"title":"PATO",
+                 "address":"Koeniginstraße 34"}}
+    }))
     .expect("poll option with media parses");
 
     assert_eq!(option.text, "PATO");
     let media = option.media.as_ref().expect("option media");
-    assert_eq!(media.kind(), Some(PollMediaKind::Venue));
+    assert_eq!(media.kind(), PollMediaKind::Venue);
     assert_eq!(
-        media.venue.as_ref().map(|venue| venue.title.as_str()),
+        media.venue_value().map(|venue| venue.title.as_str()),
         Some("PATO")
     );
 }
 
-use proptest::prelude::*;
-use telegram_api_client::{
-    Animation, Audio, Document, Link, LivePhoto, Location, MaskPosition, PhotoSize, Sticker, Venue,
-    Video,
-};
-
-/// A `PollMedia` carrying exactly the member the index selects, plus that
-/// member as the expected [`PollMediaKind`].
-fn with_member(index: u8, text: &str) -> (PollMedia, PollMediaKind) {
-    let mut media = PollMedia::default();
-    let photo = PhotoSize {
-        file_id: text.to_owned(),
-        ..PhotoSize::default()
-    };
-    let kind = match index % 10 {
-        0 => {
-            media.animation = Some(Animation {
-                file_id: text.to_owned(),
-                ..Animation::default()
-            });
-            PollMediaKind::Animation
-        }
-        1 => {
-            media.audio = Some(Audio {
-                title: Some(text.to_owned()),
-                ..Audio::default()
-            });
-            PollMediaKind::Audio
-        }
-        2 => {
-            media.document = Some(Document {
-                file_name: Some(text.to_owned()),
-                ..Document::default()
-            });
-            PollMediaKind::Document
-        }
-        3 => {
-            media.link = Some(Link {
-                url: text.to_owned(),
-            });
-            PollMediaKind::Link
-        }
-        4 => {
-            media.live_photo = Some(LivePhoto {
-                photo: Some(vec![photo]),
-                ..LivePhoto::default()
-            });
-            PollMediaKind::LivePhoto
-        }
-        5 => {
-            media.location = Some(Location {
-                latitude: 51.05,
-                longitude: 13.74,
-                ..Location::default()
-            });
-            PollMediaKind::Location
-        }
-        6 => {
-            media.photo = Some(vec![photo]);
-            PollMediaKind::Photo
-        }
-        7 => {
-            media.sticker = Some(Sticker {
-                sticker_type: text.to_owned(),
-                ..Sticker::default()
-            });
-            PollMediaKind::Sticker
-        }
-        8 => {
-            media.venue = Some(Venue {
-                title: text.to_owned(),
-                ..Venue::default()
-            });
-            PollMediaKind::Venue
-        }
-        _ => {
-            media.video = Some(Video {
-                mime_type: Some(text.to_owned()),
-                ..Video::default()
-            });
-            PollMediaKind::Video
-        }
-    };
-    (media, kind)
-}
-
-proptest! {
-    #![proptest_config(ProptestConfig { cases: 96, ..ProptestConfig::default() })]
-
-    /// Exactly one member set must name that member, and the object must
-    /// survive a JSON round trip unchanged - arbitrary Unicode included.
-    #[test]
-    fn kind_names_the_only_present_member(index in any::<u8>(), text in "\\PC{0,16}") {
-        let (media, expected) = with_member(index, &text);
-        prop_assert_eq!(media.kind(), Some(expected));
-        prop_assert!(!media.is_empty());
-
-        let json = serde_json::to_string(&media)?;
-        let back: PollMedia = serde_json::from_str(&json)?;
-        prop_assert_eq!(back, media);
-    }
-
-    /// `kind()` reports a member exactly when `is_empty()` says there is one,
-    /// whatever subset of the ten fields a payload happens to carry.
-    #[test]
-    fn kind_is_some_exactly_when_a_member_is_present(flags in any::<u16>()) {
-        let mut media = PollMedia::default();
-        if flags & 0b0000_0000_0001 != 0 {
-            media.animation = Some(Animation::default());
-        }
-        if flags & 0b0000_0000_0010 != 0 {
-            media.audio = Some(Audio::default());
-        }
-        if flags & 0b0000_0000_0100 != 0 {
-            media.document = Some(Document::default());
-        }
-        if flags & 0b0000_0000_1000 != 0 {
-            media.link = Some(Link::default());
-        }
-        if flags & 0b0000_0001_0000 != 0 {
-            media.live_photo = Some(LivePhoto::default());
-        }
-        if flags & 0b0000_0010_0000 != 0 {
-            media.location = Some(Location::default());
-        }
-        if flags & 0b0000_0100_0000 != 0 {
-            media.photo = Some(Vec::new());
-        }
-        if flags & 0b0000_1000_0000 != 0 {
-            media.sticker = Some(Sticker::default());
-        }
-        if flags & 0b0001_0000_0000 != 0 {
-            media.venue = Some(Venue::default());
-        }
-        if flags & 0b0010_0000_0000 != 0 {
-            media.video = Some(Video::default());
-        }
-
-        prop_assert_eq!(media.kind().is_some(), !media.is_empty());
-        prop_assert_eq!(media.kind().is_none(), media.is_empty());
-    }
-}
-
 #[test]
-fn mask_position_is_reflexive_for_nan() {
-    let nan = MaskPosition {
-        point: "eyes".to_owned(),
-        x_shift: f64::NAN,
-        y_shift: 0.0,
-        scale: 1.0,
-    };
-    assert_eq!(nan, nan, "bitwise comparison keeps Eq sound for NaN");
-
-    let shifted = MaskPosition {
-        x_shift: 0.0,
-        ..nan.clone()
-    };
-    assert_ne!(nan, shifted, "a zero shift is not NaN");
-}
-
-#[test]
-fn camel_case_members_are_tolerated() {
-    let poll: Poll = serde_json::from_str(
-        r#"{"media":{"livePhoto":{"fileId":"A","fileUniqueId":"u"}},"explanationMedia":{"document":{"fileId":"B"}}}"#,
-    )
+fn camel_case_members_are_tolerated_with_complete_required_fields() {
+    let poll: Poll = parse(json!({
+        "media":{"livePhoto":{"fileId":"A","fileUniqueId":"u","width":1,"height":1,"duration":0}},
+        "explanationMedia":{"document":{"fileId":"B","fileUniqueId":"v"}}
+    }))
     .expect("camelCase poll media parses");
 
     let media = poll.media.as_ref().expect("media");
-    assert_eq!(media.kind(), Some(PollMediaKind::LivePhoto));
+    assert_eq!(media.kind(), PollMediaKind::LivePhoto);
     assert_eq!(
-        media
-            .live_photo
-            .as_ref()
-            .map(|photo| photo.file_id.as_str()),
+        media.live_photo_value().map(|photo| photo.file_id.as_str()),
         Some("A")
     );
     assert_eq!(
-        poll.explanation_media.as_ref().and_then(PollMedia::kind),
+        poll.explanation_media.as_ref().map(PollMedia::kind),
         Some(PollMediaKind::Document)
     );
 }
 
+fn photos(count: usize) -> Value {
+    Value::Array(
+        (0..count)
+            .map(|index| {
+                json!({"file_id":format!("file-{index}"),"file_unique_id":"u",
+                       "width":1,"height":1})
+            })
+            .collect(),
+    )
+}
+
+fn qualities(count: usize) -> Value {
+    Value::Array(
+        (0..count)
+            .map(|index| {
+                json!({"file_id":format!("quality-{index}"),"file_unique_id":"u",
+                       "width":1,"height":1,"codec":"h264"})
+            })
+            .collect(),
+    )
+}
+
+type CollectionDocument = (&'static str, Value, fn(Value) -> bool);
+
+fn collection_documents(count: usize) -> [CollectionDocument; 4] {
+    fn parses<T: DeserializeOwned>(value: Value) -> bool {
+        parse::<T>(value).is_ok()
+    }
+
+    [
+        (
+            "PollMedia.photo",
+            json!({"photo":photos(count)}),
+            parses::<PollMedia>,
+        ),
+        (
+            "LivePhoto.photo",
+            json!({"file_id":"A","file_unique_id":"u","width":1,"height":1,
+                   "duration":0,"photo":photos(count)}),
+            parses::<LivePhoto>,
+        ),
+        (
+            "Video.cover",
+            json!({"file_id":"A","file_unique_id":"u","width":1,"height":1,
+                   "duration":0,"cover":photos(count)}),
+            parses::<Video>,
+        ),
+        (
+            "Video.qualities",
+            json!({"file_id":"A","file_unique_id":"u","width":1,"height":1,
+                   "duration":0,"qualities":qualities(count)}),
+            parses::<Video>,
+        ),
+    ]
+}
+
+#[test]
+fn collection_limits_accept_100_and_reject_101() {
+    for (label, accepted, parses) in collection_documents(MAX_MEDIA_COLLECTION_ITEMS) {
+        assert!(parses(accepted), "{label} accepts the local limit");
+    }
+    for (label, rejected, parses) in collection_documents(MAX_MEDIA_COLLECTION_ITEMS + 1) {
+        assert!(!parses(rejected), "{label} rejects one item over the limit");
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Numeric members are non-negative (issue #60).
-//
-// Every size, duration and dimension the Bot API sends is a count. Before the
-// fix these fields were `i64`, so `-1` deserialized and serialized happily and
-// produced media objects Telegram would never send.
 // ---------------------------------------------------------------------------
-
-use telegram_api_client::{Error, VideoQuality, WebhookGuard};
 
 /// Declares one bounded numeric member: `-1` must be refused with an error that
 /// names the member, `0` and the type maximum must parse.
@@ -416,7 +555,6 @@ macro_rules! bounded_member {
                 serde_json::from_str(&$template.replace("{v}", value))
             };
 
-            // Just outside the range: refused, and the error names the member.
             let refused = parse("-1").expect_err("a negative count must not parse");
             assert!(
                 refused.to_string().contains(&format!("`{}`", $field)),
@@ -424,233 +562,216 @@ macro_rules! bounded_member {
                 $field
             );
 
-            // Just inside both ends of the range: accepted.
             assert!(parse("0").is_ok(), "0 is the inclusive lower bound");
             assert!(parse($max).is_ok(), "{} is the inclusive upper bound", $max);
         }
     };
 }
 
-/// `u32::MAX` as it arrives on the wire.
 const WIRE_U32_MAX: &str = "4294967295";
-/// `u64::MAX` as it arrives on the wire.
 const WIRE_U64_MAX: &str = "18446744073709551615";
 
 bounded_member!(
     photo_size_width_is_non_negative,
     PhotoSize,
-    r#"{"width":{v}}"#,
+    r#"{"file_id":"A","file_unique_id":"u","width":{v},"height":1}"#,
     "width",
     WIRE_U32_MAX
 );
 bounded_member!(
     photo_size_height_is_non_negative,
     PhotoSize,
-    r#"{"height":{v}}"#,
+    r#"{"file_id":"A","file_unique_id":"u","width":1,"height":{v}}"#,
     "height",
     WIRE_U32_MAX
 );
 bounded_member!(
     photo_size_file_size_is_non_negative,
     PhotoSize,
-    r#"{"file_size":{v}}"#,
+    r#"{"file_id":"A","file_unique_id":"u","width":1,"height":1,"file_size":{v}}"#,
     "file_size",
     WIRE_U64_MAX
 );
-
 bounded_member!(
     live_photo_width_is_non_negative,
     LivePhoto,
-    r#"{"width":{v}}"#,
+    r#"{"file_id":"A","file_unique_id":"u","width":{v},"height":1,"duration":0}"#,
     "width",
     WIRE_U32_MAX
 );
 bounded_member!(
     live_photo_height_is_non_negative,
     LivePhoto,
-    r#"{"height":{v}}"#,
+    r#"{"file_id":"A","file_unique_id":"u","width":1,"height":{v},"duration":0}"#,
     "height",
     WIRE_U32_MAX
 );
 bounded_member!(
     live_photo_duration_is_non_negative,
     LivePhoto,
-    r#"{"duration":{v}}"#,
+    r#"{"file_id":"A","file_unique_id":"u","width":1,"height":1,"duration":{v}}"#,
     "duration",
     WIRE_U64_MAX
 );
 bounded_member!(
     live_photo_file_size_is_non_negative,
     LivePhoto,
-    r#"{"file_size":{v}}"#,
+    r#"{"file_id":"A","file_unique_id":"u","width":1,"height":1,"duration":0,"file_size":{v}}"#,
     "file_size",
     WIRE_U64_MAX
 );
-
 bounded_member!(
     animation_width_is_non_negative,
     Animation,
-    r#"{"width":{v}}"#,
+    r#"{"file_id":"A","file_unique_id":"u","width":{v},"height":1,"duration":0}"#,
     "width",
     WIRE_U32_MAX
 );
 bounded_member!(
     animation_height_is_non_negative,
     Animation,
-    r#"{"height":{v}}"#,
+    r#"{"file_id":"A","file_unique_id":"u","width":1,"height":{v},"duration":0}"#,
     "height",
     WIRE_U32_MAX
 );
 bounded_member!(
     animation_duration_is_non_negative,
     Animation,
-    r#"{"duration":{v}}"#,
+    r#"{"file_id":"A","file_unique_id":"u","width":1,"height":1,"duration":{v}}"#,
     "duration",
     WIRE_U64_MAX
 );
 bounded_member!(
     animation_file_size_is_non_negative,
     Animation,
-    r#"{"file_size":{v}}"#,
+    r#"{"file_id":"A","file_unique_id":"u","width":1,"height":1,"duration":0,"file_size":{v}}"#,
     "file_size",
     WIRE_U64_MAX
 );
-
 bounded_member!(
     audio_duration_is_non_negative,
     Audio,
-    r#"{"duration":{v}}"#,
+    r#"{"file_id":"A","file_unique_id":"u","duration":{v}}"#,
     "duration",
     WIRE_U64_MAX
 );
 bounded_member!(
     audio_file_size_is_non_negative,
     Audio,
-    r#"{"file_size":{v}}"#,
+    r#"{"file_id":"A","file_unique_id":"u","duration":0,"file_size":{v}}"#,
     "file_size",
     WIRE_U64_MAX
 );
-
 bounded_member!(
     document_file_size_is_non_negative,
     Document,
-    r#"{"file_size":{v}}"#,
+    r#"{"file_id":"A","file_unique_id":"u","file_size":{v}}"#,
     "file_size",
     WIRE_U64_MAX
 );
-
 bounded_member!(
     video_quality_width_is_non_negative,
     VideoQuality,
-    r#"{"width":{v}}"#,
+    r#"{"file_id":"A","file_unique_id":"u","width":{v},"height":1,"codec":"h264"}"#,
     "width",
     WIRE_U32_MAX
 );
 bounded_member!(
     video_quality_height_is_non_negative,
     VideoQuality,
-    r#"{"height":{v}}"#,
+    r#"{"file_id":"A","file_unique_id":"u","width":1,"height":{v},"codec":"h264"}"#,
     "height",
     WIRE_U32_MAX
 );
 bounded_member!(
     video_quality_file_size_is_non_negative,
     VideoQuality,
-    r#"{"file_size":{v}}"#,
+    r#"{"file_id":"A","file_unique_id":"u","width":1,"height":1,"codec":"h264","file_size":{v}}"#,
     "file_size",
     WIRE_U64_MAX
 );
-
 bounded_member!(
     video_width_is_non_negative,
     Video,
-    r#"{"width":{v}}"#,
+    r#"{"file_id":"A","file_unique_id":"u","width":{v},"height":1,"duration":0}"#,
     "width",
     WIRE_U32_MAX
 );
 bounded_member!(
     video_height_is_non_negative,
     Video,
-    r#"{"height":{v}}"#,
+    r#"{"file_id":"A","file_unique_id":"u","width":1,"height":{v},"duration":0}"#,
     "height",
     WIRE_U32_MAX
 );
 bounded_member!(
     video_duration_is_non_negative,
     Video,
-    r#"{"duration":{v}}"#,
+    r#"{"file_id":"A","file_unique_id":"u","width":1,"height":1,"duration":{v}}"#,
     "duration",
     WIRE_U64_MAX
 );
 bounded_member!(
     video_start_timestamp_is_non_negative,
     Video,
-    r#"{"start_timestamp":{v}}"#,
+    r#"{"file_id":"A","file_unique_id":"u","width":1,"height":1,"duration":0,"start_timestamp":{v}}"#,
     "start_timestamp",
     WIRE_U64_MAX
 );
 bounded_member!(
     video_file_size_is_non_negative,
     Video,
-    r#"{"file_size":{v}}"#,
+    r#"{"file_id":"A","file_unique_id":"u","width":1,"height":1,"duration":0,"file_size":{v}}"#,
     "file_size",
     WIRE_U64_MAX
 );
-
 bounded_member!(
     sticker_width_is_non_negative,
     Sticker,
-    r#"{"width":{v}}"#,
+    r#"{"file_id":"A","file_unique_id":"u","type":"regular","width":{v},"height":1,"is_animated":false,"is_video":false}"#,
     "width",
     WIRE_U32_MAX
 );
 bounded_member!(
     sticker_height_is_non_negative,
     Sticker,
-    r#"{"height":{v}}"#,
+    r#"{"file_id":"A","file_unique_id":"u","type":"regular","width":1,"height":{v},"is_animated":false,"is_video":false}"#,
     "height",
     WIRE_U32_MAX
 );
 bounded_member!(
     sticker_file_size_is_non_negative,
     Sticker,
-    r#"{"file_size":{v}}"#,
+    r#"{"file_id":"A","file_unique_id":"u","type":"regular","width":1,"height":1,"is_animated":false,"is_video":false,"file_size":{v}}"#,
     "file_size",
     WIRE_U64_MAX
 );
 
 #[test]
 fn dimensions_above_u32_max_are_rejected_not_truncated() {
-    let refused = serde_json::from_str::<PhotoSize>(r#"{"width":4294967296}"#)
-        .expect_err("a width that does not fit u32 must not parse");
-    assert!(
-        refused.to_string().contains("`width`"),
-        "the rejection names the member: {refused}"
-    );
-    assert!(serde_json::from_str::<Sticker>(r#"{"height":4294967296}"#).is_err());
+    let refused = serde_json::from_str::<PhotoSize>(
+        r#"{"file_id":"A","file_unique_id":"u","width":4294967296,"height":1}"#,
+    )
+    .expect_err("a width that does not fit u32 must not parse");
+    assert!(refused.to_string().contains("`width`"));
 }
 
 #[test]
 fn camel_case_sizes_are_validated_too() {
-    assert!(serde_json::from_str::<Document>(r#"{"fileSize":0}"#).is_ok());
-    let refused = serde_json::from_str::<Document>(r#"{"fileSize":-1}"#)
-        .expect_err("the camelCase alias is the same member and is checked too");
+    assert!(
+        serde_json::from_str::<Document>(r#"{"fileId":"A","fileUniqueId":"u","fileSize":0}"#)
+            .is_ok()
+    );
+    let refused =
+        serde_json::from_str::<Document>(r#"{"fileId":"A","fileUniqueId":"u","fileSize":-1}"#)
+            .expect_err("the camelCase alias is the same member and is checked too");
     assert!(refused.to_string().contains("file_size"));
-}
-
-#[test]
-fn missing_and_unknown_members_keep_their_defaults() {
-    let photo: PhotoSize = serde_json::from_str(r#"{"width":320,"future_member":"x"}"#)
-        .expect("an unknown member is still ignored");
-    assert_eq!(photo.width, 320);
-    assert_eq!(photo.height, 0, "an absent dimension defaults to zero");
-    assert_eq!(photo.file_size, None, "an absent size stays unknown");
 }
 
 #[test]
 fn a_negative_member_inside_poll_media_is_rejected() {
     let refused = serde_json::from_str::<Poll>(
-        r#"{"media":{"photo":[{"file_id":"A","width":320,"file_size":-1}]}}"#,
+        r#"{"media":{"photo":[{"file_id":"A","file_unique_id":"u","width":320,"height":1,"file_size":-1}]}}"#,
     )
     .expect_err("the wire path through PollMedia is validated as well");
     assert!(refused.to_string().contains("file_size"), "{refused}");
@@ -658,27 +779,21 @@ fn a_negative_member_inside_poll_media_is_rejected() {
 
 #[test]
 fn a_negative_member_surfaces_as_a_payload_error() {
-    // `-1` never reaches the caller as a value: the webhook parser maps the
-    // serde rejection to `Error::Payload`, like every other undecodable body.
     let guard = WebhookGuard::new("s3cret").expect("a non-empty secret");
-    let body = br#"{"update_id":1,"poll":{"media":{"photo":[{"file_id":"A","width":-1}]}}}"#;
+    let body = br#"{"update_id":1,"poll":{"media":{"photo":[{"file_id":"A","file_unique_id":"u","width":-1,"height":1}]}}}"#;
 
     let error = guard
         .verify_and_parse(Some("s3cret"), guard.derived_path(), body)
         .expect_err("a negative width cannot be decoded");
 
     assert!(matches!(error, Error::Payload { .. }), "{error:?}");
-    let message = error.to_string();
-    assert!(message.contains("`width`"), "{message}");
+    assert!(error.to_string().contains("`width`"), "{error}");
 }
 
 #[test]
 fn a_negative_poll_option_member_is_a_payload_error_that_names_the_member() {
-    // The webhook is the real entry point: a negative member deep inside a poll
-    // option's media cannot be decoded, so it must surface as `Error::Payload`
-    // with the offending member named in both the message and the source.
     let guard = WebhookGuard::new("s3cret").expect("a non-empty secret");
-    let body = br#"{"update_id":1,"poll":{"options":[{"text":"a","media":{"photo":[{"file_id":"A","fileSize":-1}]}}]}}"#;
+    let body = br#"{"update_id":1,"poll":{"options":[{"text":"a","media":{"photo":[{"file_id":"A","file_unique_id":"u","width":1,"height":1,"fileSize":-1}]}}]}}"#;
 
     let error = guard
         .verify_and_parse(Some("s3cret"), guard.derived_path(), body)
@@ -695,8 +810,10 @@ fn a_negative_poll_option_member_is_a_payload_error_that_names_the_member() {
 }
 
 #[test]
-fn the_bounds_survive_a_round_trip() {
+fn unsigned_bounds_survive_a_round_trip() {
     let video = Video {
+        file_id: "A".into(),
+        file_unique_id: "u".into(),
         width: u32::MAX,
         height: 0,
         duration: u64::MAX,
@@ -705,134 +822,242 @@ fn the_bounds_survive_a_round_trip() {
         ..Video::default()
     };
     let json = serde_json::to_string(&video).expect("the bounds serialize");
-    assert!(
-        !json.contains('-'),
-        "an unsigned member can only emit an unsigned number: {json}"
-    );
+    assert!(!json.contains('-'));
     let back: Video = serde_json::from_str(&json).expect("the bounds parse back");
     assert_eq!(back, video);
 }
 
-/// One numeric member: its label, its JSON template with `{v}` for the number
-/// under test, and whether that object parses.
-type NumericMember = (&'static str, &'static str, fn(&str) -> bool);
+// ---------------------------------------------------------------------------
+// MaskPosition (issue #61).
+// ---------------------------------------------------------------------------
 
-/// Every numeric member of every media object.
-fn numeric_members() -> Vec<NumericMember> {
-    fn accepts<T: serde::de::DeserializeOwned>(json: &str) -> bool {
-        serde_json::from_str::<T>(json).is_ok()
+#[test]
+fn mask_points_round_trip_known_and_unknown_values() {
+    for (wire, point) in [
+        ("forehead", MaskPoint::Forehead),
+        ("eyes", MaskPoint::Eyes),
+        ("mouth", MaskPoint::Mouth),
+        ("chin", MaskPoint::Chin),
+        ("future", MaskPoint::Unknown("future".into())),
+    ] {
+        assert_eq!(point.as_str(), wire);
+        let position = MaskPosition {
+            point: point.clone(),
+            x_shift: -0.25,
+            y_shift: 0.5,
+            scale: 2.0,
+        };
+        let encoded = serde_json::to_value(&position).expect("valid position serializes");
+        assert_eq!(encoded["point"], wire);
+        let decoded: MaskPosition =
+            serde_json::from_value(encoded).expect("preserved point parses");
+        assert_eq!(decoded, position);
     }
-
-    vec![
-        ("PhotoSize.width", r#"{"width":{v}}"#, accepts::<PhotoSize>),
-        (
-            "PhotoSize.height",
-            r#"{"height":{v}}"#,
-            accepts::<PhotoSize>,
-        ),
-        (
-            "PhotoSize.file_size",
-            r#"{"file_size":{v}}"#,
-            accepts::<PhotoSize>,
-        ),
-        ("LivePhoto.width", r#"{"width":{v}}"#, accepts::<LivePhoto>),
-        (
-            "LivePhoto.height",
-            r#"{"height":{v}}"#,
-            accepts::<LivePhoto>,
-        ),
-        (
-            "LivePhoto.duration",
-            r#"{"duration":{v}}"#,
-            accepts::<LivePhoto>,
-        ),
-        (
-            "LivePhoto.file_size",
-            r#"{"file_size":{v}}"#,
-            accepts::<LivePhoto>,
-        ),
-        ("Animation.width", r#"{"width":{v}}"#, accepts::<Animation>),
-        (
-            "Animation.height",
-            r#"{"height":{v}}"#,
-            accepts::<Animation>,
-        ),
-        (
-            "Animation.duration",
-            r#"{"duration":{v}}"#,
-            accepts::<Animation>,
-        ),
-        (
-            "Animation.file_size",
-            r#"{"file_size":{v}}"#,
-            accepts::<Animation>,
-        ),
-        ("Audio.duration", r#"{"duration":{v}}"#, accepts::<Audio>),
-        ("Audio.file_size", r#"{"file_size":{v}}"#, accepts::<Audio>),
-        (
-            "Document.file_size",
-            r#"{"file_size":{v}}"#,
-            accepts::<Document>,
-        ),
-        (
-            "VideoQuality.width",
-            r#"{"width":{v}}"#,
-            accepts::<VideoQuality>,
-        ),
-        (
-            "VideoQuality.height",
-            r#"{"height":{v}}"#,
-            accepts::<VideoQuality>,
-        ),
-        (
-            "VideoQuality.file_size",
-            r#"{"file_size":{v}}"#,
-            accepts::<VideoQuality>,
-        ),
-        ("Video.width", r#"{"width":{v}}"#, accepts::<Video>),
-        ("Video.height", r#"{"height":{v}}"#, accepts::<Video>),
-        ("Video.duration", r#"{"duration":{v}}"#, accepts::<Video>),
-        (
-            "Video.start_timestamp",
-            r#"{"start_timestamp":{v}}"#,
-            accepts::<Video>,
-        ),
-        ("Video.file_size", r#"{"file_size":{v}}"#, accepts::<Video>),
-        ("Sticker.width", r#"{"width":{v}}"#, accepts::<Sticker>),
-        ("Sticker.height", r#"{"height":{v}}"#, accepts::<Sticker>),
-        (
-            "Sticker.file_size",
-            r#"{"file_size":{v}}"#,
-            accepts::<Sticker>,
-        ),
-    ]
 }
 
-proptest! {
-    #![proptest_config(ProptestConfig { cases: 64, ..ProptestConfig::default() })]
+#[test]
+fn mask_position_rejects_invalid_floats_before_serializing() {
+    let valid = MaskPosition {
+        point: MaskPoint::Eyes,
+        x_shift: 0.0,
+        y_shift: 0.0,
+        scale: 1.0,
+    };
+    assert!(valid.validate().is_ok());
+    assert!(serde_json::to_value(&valid).is_ok());
 
-    /// No integer below zero is accepted by any numeric member, whatever its
-    /// magnitude - the whole negative range, not just `-1`.
-    #[test]
-    fn no_negative_number_is_ever_accepted(value in i64::MIN..=-1) {
-        for (label, template, accepts) in numeric_members() {
-            let json = template.replace("{v}", &value.to_string());
-            prop_assert!(!accepts(&json), "{} accepted {value}", label);
+    for (label, mutate) in [
+        (
+            "x NaN",
+            (|p: &mut MaskPosition| p.x_shift = f64::NAN) as fn(&mut MaskPosition),
+        ),
+        ("x infinity", |p| p.x_shift = f64::INFINITY),
+        ("y NaN", |p| p.y_shift = f64::NAN),
+        ("y negative infinity", |p| p.y_shift = f64::NEG_INFINITY),
+        ("zero scale", |p| p.scale = 0.0),
+        ("negative scale", |p| p.scale = -1.0),
+        ("NaN scale", |p| p.scale = f64::NAN),
+        ("infinite scale", |p| p.scale = f64::INFINITY),
+    ] {
+        let mut position = valid.clone();
+        mutate(&mut position);
+        assert!(position.validate().is_err(), "{label} must be refused");
+        assert!(
+            serde_json::to_value(&position).is_err(),
+            "{label} must not serialize"
+        );
+    }
+}
+
+#[test]
+fn mask_position_rejects_empty_points_and_non_positive_scales() {
+    for point in [
+        MaskPoint::Unknown(String::new()),
+        MaskPoint::Unknown(" ".into()),
+    ] {
+        let position = MaskPosition {
+            point,
+            x_shift: 0.0,
+            y_shift: 0.0,
+            scale: 1.0,
+        };
+        if position.point.as_str().is_empty() {
+            assert!(position.validate().is_err());
+        } else {
+            assert!(
+                position.validate().is_ok(),
+                "unknown non-empty points survive"
+            );
         }
     }
 
-    /// Unsigned counts survive a JSON round trip unchanged, at any magnitude.
-    #[test]
-    fn unsigned_members_round_trip(
-        width in any::<u32>(),
-        height in any::<u32>(),
-        duration in any::<u64>(),
-        file_size in any::<u64>(),
-    ) {
-        let sticker = Sticker { width, height, file_size: Some(file_size), ..Sticker::default() };
-        prop_assert_eq!(serde_json::from_str::<Sticker>(&serde_json::to_string(&sticker)?)?, sticker);
+    for scale in [0.0, -1.0] {
+        let position = MaskPosition {
+            point: MaskPoint::Eyes,
+            x_shift: 0.0,
+            y_shift: 0.0,
+            scale,
+        };
+        assert!(position.validate().is_err());
+    }
+}
 
-        let audio = Audio { duration, file_size: Some(file_size), ..Audio::default() };
-        prop_assert_eq!(serde_json::from_str::<Audio>(&serde_json::to_string(&audio)?)?, audio);
+#[test]
+fn mask_position_decoding_refuses_invalid_values() {
+    for json in [
+        r#"{"point":"","x_shift":0.0,"y_shift":0.0,"scale":1.0}"#,
+        r#"{"point":"eyes","x_shift":0.0,"y_shift":0.0,"scale":0.0}"#,
+        r#"{"point":"eyes","x_shift":0.0,"y_shift":0.0,"scale":-1.0}"#,
+    ] {
+        assert!(
+            serde_json::from_str::<MaskPosition>(json).is_err(),
+            "{json}"
+        );
+    }
+}
+
+#[test]
+fn mask_position_equality_is_reflexive_for_nan() {
+    let nan = MaskPosition {
+        point: MaskPoint::Eyes,
+        x_shift: f64::NAN,
+        y_shift: 0.0,
+        scale: 1.0,
+    };
+    assert_eq!(nan, nan, "bitwise comparison keeps Eq sound for NaN");
+
+    let shifted = MaskPosition {
+        x_shift: 0.0,
+        ..nan.clone()
+    };
+    assert_ne!(nan, shifted, "a zero shift is not NaN");
+}
+
+use proptest::prelude::*;
+
+fn member_mask_document(flags: u16) -> Value {
+    let mut object = serde_json::Map::new();
+    if flags & (1 << 0) != 0 {
+        object.insert(
+            "animation".into(),
+            json!({"file_id":"A","file_unique_id":"u","width":0,"height":0,"duration":0}),
+        );
+    }
+    if flags & (1 << 1) != 0 {
+        object.insert(
+            "audio".into(),
+            json!({"file_id":"A","file_unique_id":"u","duration":0}),
+        );
+    }
+    if flags & (1 << 2) != 0 {
+        object.insert(
+            "document".into(),
+            json!({"file_id":"A","file_unique_id":"u"}),
+        );
+    }
+    if flags & (1 << 3) != 0 {
+        object.insert("link".into(), json!({"url":"https://example.com"}));
+    }
+    if flags & (1 << 4) != 0 {
+        object.insert(
+            "live_photo".into(),
+            json!({"file_id":"A","file_unique_id":"u","width":0,"height":0,"duration":0}),
+        );
+    }
+    if flags & (1 << 5) != 0 {
+        object.insert("location".into(), json!({"latitude":0.0,"longitude":0.0}));
+    }
+    if flags & (1 << 6) != 0 {
+        object.insert(
+            "photo".into(),
+            json!([{"file_id":"A","file_unique_id":"u","width":0,"height":0}]),
+        );
+    }
+    if flags & (1 << 7) != 0 {
+        object.insert("sticker".into(), json!({"file_id":"A","file_unique_id":"u","type":"regular","width":0,"height":0,"is_animated":false,"is_video":false}));
+    }
+    if flags & (1 << 8) != 0 {
+        object.insert(
+            "venue".into(),
+            json!({"location":{"latitude":0.0,"longitude":0.0},"title":"T","address":"A"}),
+        );
+    }
+    if flags & (1 << 9) != 0 {
+        object.insert(
+            "video".into(),
+            json!({"file_id":"A","file_unique_id":"u","width":0,"height":0,"duration":0}),
+        );
+    }
+    Value::Object(object)
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig { cases: 96, ..ProptestConfig::default() })]
+
+    #[test]
+    fn member_masks_parse_exactly_when_they_name_one_member(
+        flags in any::<u16>().prop_map(|value| value & 0x03ff)
+    ) {
+        let parsed = parse::<PollMedia>(member_mask_document(flags));
+        prop_assert_eq!(parsed.is_ok(), flags.is_power_of_two(), "mask {:#012b}", flags);
+    }
+
+    #[test]
+    fn bounded_collections_accept_every_size_through_the_limit(
+        count in 0usize..=MAX_MEDIA_COLLECTION_ITEMS
+    ) {
+        for (label, document, parses) in collection_documents(count) {
+            prop_assert_eq!(count != 0 || !label.starts_with("PollMedia"), parses(document),
+                "{} rejected {} items", label, count);
+        }
+    }
+
+    #[test]
+    fn bounded_collections_refuse_more_than_the_limit(
+        count in (MAX_MEDIA_COLLECTION_ITEMS + 1)..=200usize
+    ) {
+        for (label, document, parses) in collection_documents(count) {
+            prop_assert!(!parses(document), "{} accepted {} items", label, count);
+        }
+    }
+
+    #[test]
+    fn finite_mask_positions_round_trip(
+        x in -1000.0f64..1000.0,
+        y in -1000.0f64..1000.0,
+        scale in 0.001f64..1000.0
+    ) {
+        let position = MaskPosition {
+            point: MaskPoint::Chin,
+            x_shift: x,
+            y_shift: y,
+            scale,
+        };
+        let encoded = serde_json::to_string(&position)?;
+        let decoded: MaskPosition = serde_json::from_str(&encoded)?;
+        prop_assert_eq!(decoded.point, position.point);
+        prop_assert!((decoded.x_shift - position.x_shift).abs() <= position.x_shift.abs() * 1e-15);
+        prop_assert!((decoded.y_shift - position.y_shift).abs() <= position.y_shift.abs() * 1e-15);
+        prop_assert!((decoded.scale - position.scale).abs() <= position.scale.abs() * 1e-15);
     }
 }

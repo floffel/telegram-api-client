@@ -8,7 +8,8 @@
 //! The wire shapes are pinned as fixtures in `docs/contracts.md`, taken from
 //! <https://core.telegram.org/bots/api>.
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde_json::{Map, Value};
 
 use crate::chat::ChatMember;
 use crate::media::PollMedia;
@@ -192,8 +193,7 @@ fn is_iso_4217_currency(code: &str) -> bool {
 /// let reaction: ReactionType = serde_json::from_str(r#"{"type":"emoji","emoji":"👍"}"#).unwrap();
 /// assert_eq!(reaction.glyph(), Some("👍"));
 /// ```
-#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ReactionType {
     /// A plain unicode emoji.
@@ -204,18 +204,40 @@ pub enum ReactionType {
     /// One of Telegram's custom (premium) emoji.
     CustomEmoji {
         /// Identifier of the custom emoji; resolve it with `getCustomEmojiStickers`.
-        #[serde(alias = "customEmojiId")]
         custom_emoji_id: String,
     },
     /// A paid reaction, bought with Telegram Stars.
     Paid,
     /// A reaction kind this crate does not know yet.
-    #[default]
-    #[serde(other)]
-    Unknown,
+    Unknown {
+        /// The wire tag this crate does not recognize yet.
+        tag: String,
+        /// Every other field of the unknown reaction, preserved verbatim.
+        fields: Map<String, Value>,
+    },
 }
 
 impl ReactionType {
+    /// The wire tag of this reaction.
+    #[must_use]
+    pub fn tag(&self) -> &str {
+        match self {
+            Self::Emoji { .. } => "emoji",
+            Self::CustomEmoji { .. } => "custom_emoji",
+            Self::Paid => "paid",
+            Self::Unknown { tag, .. } => tag,
+        }
+    }
+
+    /// The fields carried by an unknown reaction, when this is one.
+    #[must_use]
+    pub fn unknown_fields(&self) -> Option<&Map<String, Value>> {
+        match self {
+            Self::Unknown { fields, .. } => Some(fields),
+            _ => None,
+        }
+    }
+
     /// The emoji a user picked, when this is a plain emoji reaction.
     ///
     /// ```
@@ -240,6 +262,85 @@ impl ReactionType {
             _ => None,
         }
     }
+}
+
+impl Default for ReactionType {
+    fn default() -> Self {
+        Self::Unknown {
+            tag: "unknown".to_string(),
+            fields: Map::new(),
+        }
+    }
+}
+
+impl Serialize for ReactionType {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut object = match self {
+            Self::Emoji { emoji } => {
+                Map::from_iter([("emoji".to_string(), Value::String(emoji.clone()))])
+            }
+            Self::CustomEmoji { custom_emoji_id } => Map::from_iter([(
+                "custom_emoji_id".to_string(),
+                Value::String(custom_emoji_id.clone()),
+            )]),
+            Self::Paid => Map::new(),
+            Self::Unknown { fields, .. } => fields.clone(),
+        };
+        object.insert("type".to_string(), Value::String(self.tag().to_string()));
+        object.serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for ReactionType {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let Value::Object(mut object) = Value::deserialize(deserializer)? else {
+            return Err(serde::de::Error::custom("reaction must be a JSON object"));
+        };
+        let tag = string_field(&mut object, "type", "reaction")?;
+        match tag.as_str() {
+            "emoji" => Ok(Self::Emoji {
+                emoji: string_field(&mut object, "emoji", "emoji reaction")?,
+            }),
+            "custom_emoji" => {
+                let value = object
+                    .remove("custom_emoji_id")
+                    .or_else(|| object.remove("customEmojiId"))
+                    .ok_or_else(|| serde::de::Error::missing_field("custom_emoji_id"))?;
+                let custom_emoji_id = value
+                    .as_str()
+                    .ok_or_else(|| serde::de::Error::custom("custom_emoji_id must be a string"))?
+                    .to_string();
+                Ok(Self::CustomEmoji { custom_emoji_id })
+            }
+            "paid" => Ok(Self::Paid),
+            _ => Ok(Self::Unknown {
+                tag,
+                fields: object,
+            }),
+        }
+    }
+}
+
+fn string_field<E>(
+    object: &mut Map<String, Value>,
+    field: &'static str,
+    context: &str,
+) -> Result<String, E>
+where
+    E: serde::de::Error,
+{
+    object
+        .remove(field)
+        .ok_or_else(|| E::missing_field(field))?
+        .as_str()
+        .map(ToOwned::to_owned)
+        .ok_or_else(|| E::custom(format!("{context} field `{field}` must be a string")))
 }
 
 /// A reaction and how many users set it.
@@ -702,49 +803,37 @@ pub struct ChatJoinRequest {
 ///     serde_json::from_str(r#"{"source":"premium","user":{"id":1}}"#).unwrap();
 /// assert_eq!(source.source_kind(), "premium");
 /// ```
-#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(tag = "source", rename_all = "snake_case")]
+#[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ChatBoostSource {
     /// A premium subscription boosted the chat.
     Premium {
         /// The premium user.
-        #[serde(default)]
         user: Option<User>,
     },
     /// A gifted premium subscription boosted the chat.
     GiftCode {
         /// The user who received the gift.
-        #[serde(default)]
         user: Option<User>,
     },
     /// A giveaway prize boosted the chat.
     Giveaway {
         /// Message with the giveaway.
-        #[serde(default, alias = "giveawayMessageId")]
         giveaway_message_id: i64,
         /// The user who won, if they are not anonymous.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         user: Option<User>,
         /// Stars that came with the prize.
-        #[serde(
-            default,
-            alias = "prizeStarCount",
-            skip_serializing_if = "Option::is_none"
-        )]
         prize_star_count: Option<i64>,
         /// Whether the prize is still unclaimed.
-        #[serde(
-            default,
-            alias = "isUnclaimed",
-            skip_serializing_if = "Option::is_none"
-        )]
         is_unclaimed: Option<bool>,
     },
     /// A source this crate does not know yet.
-    #[default]
-    #[serde(other)]
-    Unknown,
+    Unknown {
+        /// The wire tag this crate does not recognize yet.
+        tag: String,
+        /// Every other field of the unknown source, preserved verbatim.
+        fields: Map<String, Value>,
+    },
 }
 
 impl ChatBoostSource {
@@ -756,12 +845,21 @@ impl ChatBoostSource {
     /// assert_eq!(ChatBoostSource::default().source_kind(), "unknown");
     /// ```
     #[must_use]
-    pub fn source_kind(&self) -> &'static str {
+    pub fn source_kind(&self) -> &str {
         match self {
             Self::Premium { .. } => "premium",
             Self::GiftCode { .. } => "gift_code",
             Self::Giveaway { .. } => "giveaway",
-            Self::Unknown => "unknown",
+            Self::Unknown { tag, .. } => tag,
+        }
+    }
+
+    /// The fields carried by an unknown source, when this is one.
+    #[must_use]
+    pub fn unknown_fields(&self) -> Option<&Map<String, Value>> {
+        match self {
+            Self::Unknown { fields, .. } => Some(fields),
+            _ => None,
         }
     }
 
@@ -773,7 +871,118 @@ impl ChatBoostSource {
                 user.as_ref()
             }
 
-            Self::Unknown => None,
+            Self::Unknown { .. } => None,
+        }
+    }
+}
+
+impl Default for ChatBoostSource {
+    fn default() -> Self {
+        Self::Unknown {
+            tag: "unknown".to_string(),
+            fields: Map::new(),
+        }
+    }
+}
+
+#[derive(Deserialize, Serialize)]
+struct PremiumSourceFields {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    user: Option<User>,
+}
+
+#[derive(Deserialize, Serialize)]
+struct GiveawaySourceFields {
+    #[serde(default, alias = "giveawayMessageId")]
+    giveaway_message_id: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    user: Option<User>,
+    #[serde(
+        default,
+        alias = "prizeStarCount",
+        skip_serializing_if = "Option::is_none"
+    )]
+    prize_star_count: Option<i64>,
+    #[serde(
+        default,
+        alias = "isUnclaimed",
+        skip_serializing_if = "Option::is_none"
+    )]
+    is_unclaimed: Option<bool>,
+}
+
+impl Serialize for ChatBoostSource {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let fields = match self {
+            Self::Premium { user } | Self::GiftCode { user } => {
+                serde_json::to_value(PremiumSourceFields { user: user.clone() })
+            }
+            Self::Giveaway {
+                giveaway_message_id,
+                user,
+                prize_star_count,
+                is_unclaimed,
+            } => serde_json::to_value(GiveawaySourceFields {
+                giveaway_message_id: *giveaway_message_id,
+                user: user.clone(),
+                prize_star_count: *prize_star_count,
+                is_unclaimed: *is_unclaimed,
+            }),
+            Self::Unknown { fields, .. } => Ok(Value::Object(fields.clone())),
+        }
+        .map_err(serde::ser::Error::custom)?;
+        let Value::Object(mut object) = fields else {
+            return Err(serde::ser::Error::custom(
+                "boost source fields must be a JSON object",
+            ));
+        };
+        object.insert(
+            "source".to_string(),
+            Value::String(self.source_kind().to_string()),
+        );
+        object.serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for ChatBoostSource {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let Value::Object(mut object) = Value::deserialize(deserializer)? else {
+            return Err(serde::de::Error::custom(
+                "boost source must be a JSON object",
+            ));
+        };
+        let tag = string_field(&mut object, "source", "boost source")?;
+        let value = Value::Object(object.clone());
+        match tag.as_str() {
+            "premium" | "gift_code" => {
+                let fields = serde_json::from_value::<PremiumSourceFields>(value)
+                    .map_err(serde::de::Error::custom)?;
+                if tag == "premium" {
+                    Ok(Self::Premium { user: fields.user })
+                } else {
+                    Ok(Self::GiftCode { user: fields.user })
+                }
+            }
+            "giveaway" => {
+                let fields = serde_json::from_value::<GiveawaySourceFields>(value)
+                    .map_err(serde::de::Error::custom)?;
+                Ok(Self::Giveaway {
+                    giveaway_message_id: fields.giveaway_message_id,
+                    user: fields.user,
+                    prize_star_count: fields.prize_star_count,
+                    is_unclaimed: fields.is_unclaimed,
+                })
+            }
+            _ => Ok(Self::Unknown {
+                tag,
+                fields: object,
+            }),
         }
     }
 }

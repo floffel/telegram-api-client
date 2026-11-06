@@ -57,21 +57,36 @@ optional fields can be present in any given update."*
 ## `PollMedia`
 
 Quote, "PollMedia": *"At most one of the optional fields can be present in any
-given object."* The object is modelled as a flat set of ten optional fields,
-not as a tagged union.
+given object."* The object is modelled as a private one-of value with
+constructors and typed accessors. Decoding requires exactly one member; a
+non-empty `photo` array is required for the photo member. Unknown member names
+and adjacent fields are retained as [`serde_json::Value`], so a newer Bot API
+round-trips without losing data (#57, #58).
 
-| Field | Type | Rust field |
+| Field | Type | Constructor / accessor |
 | --- | --- | --- |
-| `animation` | Animation | `PollMedia::animation` |
-| `audio` | Audio | `PollMedia::audio` |
-| `document` | Document | `PollMedia::document` |
-| `link` | Link | `PollMedia::link` |
-| `live_photo` | LivePhoto | `PollMedia::live_photo` |
-| `location` | Location | `PollMedia::location` |
-| `photo` | Array of PhotoSize | `PollMedia::photo` |
-| `sticker` | Sticker | `PollMedia::sticker` |
-| `venue` | Venue | `PollMedia::venue` |
-| `video` | Video | `PollMedia::video` |
+| `animation` | Animation | `PollMedia::animation` / `animation_value` |
+| `audio` | Audio | `PollMedia::audio` / `audio_value` |
+| `document` | Document | `PollMedia::document` / `document_value` |
+| `link` | Link | `PollMedia::link` / `link_value` |
+| `live_photo` | LivePhoto | `PollMedia::live_photo` / `live_photo_value` |
+| `location` | Location | `PollMedia::location` / `location_value` |
+| `photo` | Array of PhotoSize | `PollMedia::photo` / `photo_value` |
+| `sticker` | Sticker | `PollMedia::sticker` / `sticker_value` |
+| `venue` | Venue | `PollMedia::venue` / `venue_value` |
+| `video` | Video | `PollMedia::video` / `video_value` |
+| any other name | JSON value | `PollMediaKind::Unknown` / `unknown_value` |
+
+`LivePhoto.photo`, `Video.cover`, `Video.qualities` and `PollMedia.photo` are
+bounded at `MAX_MEDIA_COLLECTION_ITEMS = 100` during deserialization. The bound
+is enforced by a sequence visitor before the vector grows, so an attacker-size
+array cannot trigger proportional pre-allocation (#59).
+
+The required fields in every media object are required on decode. There are no
+default empty identifiers or zero dimensions for absent fields (#56). Unknown
+enum strings such as `MaskPoint` are retained; `MaskPosition` rejects an empty
+point, non-finite shifts, and non-finite or non-positive scales both while
+decoding and before serialization (#61).
 
 | Item | Value |
 | --- | --- |
