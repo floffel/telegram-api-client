@@ -410,7 +410,7 @@ async fn callback_and_inline() {
 
     let (client, transport) = ok_bool();
     client
-        .set_chat_menu_button(&SetChatMenuButton::for_chat(CHAT, MenuButton::Commands))
+        .set_chat_menu_button(&SetChatMenuButton::for_chat(CHAT, MenuButton::commands()))
         .await
         .unwrap();
     assert_call(

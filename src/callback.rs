@@ -3,16 +3,20 @@
 use std::collections::HashSet;
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 
 use crate::error::{Error, Result};
 use crate::send::validate_chat;
 use crate::types::{ChatId, WebAppInfo};
 
-/// Longest accepted `text` of a callback answer, in characters.
+/// Longest accepted `text` of a callback answer, in UTF-16 code units.
 pub const MAX_CALLBACK_TEXT: usize = 200;
 /// Most results a single inline query answer may carry.
 pub const MAX_INLINE_RESULTS: usize = 50;
+/// Longest accepted `next_offset` of an inline query answer, in bytes.
+pub const MAX_INLINE_NEXT_OFFSET_BYTES: usize = 64;
+/// Longest accepted inline result button start parameter, in bytes.
+pub const MAX_INLINE_START_PARAMETER_BYTES: usize = 64;
 /// Longest accepted `id` of an inline query result, in bytes.
 ///
 /// The Bot API calls `id` *"Unique identifier for this result, 1-64 Bytes"*, so
@@ -48,7 +52,7 @@ pub const MAX_INLINE_RESULT_ID_BYTES: usize = 64;
 pub struct AnswerCallbackQuery {
     /// Id from the [`crate::CallbackQuery`] being answered.
     pub callback_query_id: String,
-    /// Notification text, up to 200 characters.
+    /// Notification text, up to 200 UTF-16 code units.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
     /// Show the text as a modal alert instead of a toast.
@@ -102,11 +106,11 @@ impl AnswerCallbackQuery {
         if self
             .text
             .as_ref()
-            .is_some_and(|text| text.chars().count() > MAX_CALLBACK_TEXT)
+            .is_some_and(|text| text.encode_utf16().count() > MAX_CALLBACK_TEXT)
         {
             return Err(Error::InvalidRequest {
                 field: "text",
-                reason: format!("must be at most {MAX_CALLBACK_TEXT} characters"),
+                reason: format!("must be at most {MAX_CALLBACK_TEXT} UTF-16 code units"),
             });
         }
         Ok(())
@@ -261,6 +265,63 @@ impl InlineQueryResultsButton {
             web_app: None,
         }
     }
+
+    /// A button that opens `web_app`.
+    #[must_use]
+    pub fn web_app(text: impl Into<String>, url: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            start_parameter: None,
+            web_app: Some(WebAppInfo::new(url)),
+        }
+    }
+
+    /// Checks the label and the exactly-one payload rule.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidRequest`] naming `button` when the label is blank, when
+    /// neither or both payload fields are set, when `start_parameter` is not 1
+    /// to [`MAX_INLINE_START_PARAMETER_BYTES`] ASCII letters, digits, `_` or
+    /// `-`, or when the Mini App URL is not an absolute HTTPS URL.
+    pub fn validate(&self) -> Result<()> {
+        if self.text.trim().is_empty() {
+            return Err(invalid_button("text must not be empty"));
+        }
+        match (&self.start_parameter, &self.web_app) {
+            (Some(parameter), None) => {
+                if parameter.is_empty() || parameter.len() > MAX_INLINE_START_PARAMETER_BYTES {
+                    return Err(invalid_button(format!(
+                        "start_parameter must be 1 to {MAX_INLINE_START_PARAMETER_BYTES} bytes, got {}",
+                        parameter.len()
+                    )));
+                }
+                if !parameter
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+                {
+                    return Err(invalid_button(
+                        "start_parameter may contain only ASCII letters, digits, '_' and '-'",
+                    ));
+                }
+                Ok(())
+            }
+            (None, Some(web_app)) => validate_https_url("button", "web_app.url", &web_app.url),
+            (Some(_), Some(_)) => Err(invalid_button(
+                "start_parameter and web_app are mutually exclusive",
+            )),
+            (None, None) => Err(invalid_button(
+                "exactly one of start_parameter or web_app is required",
+            )),
+        }
+    }
+}
+
+fn invalid_button(reason: impl Into<String>) -> Error {
+    Error::InvalidRequest {
+        field: "button",
+        reason: reason.into(),
+    }
 }
 
 /// `answerInlineQuery` body.
@@ -319,7 +380,7 @@ impl AnswerInlineQuery {
         self
     }
 
-    /// Checks the query id, the result count and every result's structure.
+    /// Checks the query id, results, pagination offset and optional button.
     ///
     /// Each result must be a JSON object with a non-empty string `type` and a
     /// unique string `id` of 1 to [`MAX_INLINE_RESULT_ID_BYTES`] bytes; the Bot
@@ -348,8 +409,9 @@ impl AnswerInlineQuery {
     ///
     /// [`Error::InvalidRequest`] for an empty query id, zero results, more than
     /// [`MAX_INLINE_RESULTS`] results, a result that is not a JSON object, a
-    /// missing, non-string or blank `type`, and a missing, non-string, empty,
-    /// overlong or duplicate `id`.
+    /// missing, non-string or blank `type`, a missing, non-string, empty,
+    /// overlong or duplicate `id`, a `next_offset` over
+    /// [`MAX_INLINE_NEXT_OFFSET_BYTES`], or an invalid result button.
     pub fn validate(&self) -> Result<()> {
         if self.inline_query_id.trim().is_empty() {
             return Err(Error::InvalidRequest {
@@ -383,11 +445,43 @@ impl AnswerInlineQuery {
                 });
             }
         }
+        if self
+            .next_offset
+            .as_ref()
+            .is_some_and(|offset| offset.len() > MAX_INLINE_NEXT_OFFSET_BYTES)
+        {
+            return Err(Error::InvalidRequest {
+                field: "next_offset",
+                reason: format!(
+                    "must be at most {MAX_INLINE_NEXT_OFFSET_BYTES} bytes, got {}",
+                    self.next_offset.as_ref().map_or(0, String::len)
+                ),
+            });
+        }
+        if let Some(button) = &self.button {
+            button.validate()?;
+        }
         Ok(())
     }
 }
 
+fn validate_https_url(field: &'static str, name: &'static str, value: &str) -> Result<()> {
+    let prefix = "https://";
+    if !value.starts_with(prefix) || value.len() == prefix.len() || value.trim() != value {
+        return Err(Error::InvalidRequest {
+            field,
+            reason: format!("{name} must be an absolute https:// URL"),
+        });
+    }
+    Ok(())
+}
+
 /// The button in the chat's input field.
+///
+/// Every known variant carries the members this crate does not model in
+/// `extra` and writes them back unchanged, so a button that gains a field in a
+/// later Bot API revision survives a round trip. A preserved member never
+/// displaces a modelled one: `type`, `text` and `web_app.url` always win.
 ///
 /// ```
 /// use telegram_api_client::MenuButton;
@@ -404,87 +498,231 @@ impl AnswerInlineQuery {
 /// // Unknown button types survive a round trip.
 /// let raw: MenuButton = serde_json::from_str(r#"{"type":"future","x":1}"#).unwrap();
 /// assert_eq!(serde_json::to_value(&raw).unwrap()["type"], "future");
+///
+/// // So do unknown members on a known button type, top level and nested.
+/// let fresh: MenuButton =
+///     serde_json::from_str(r#"{"type":"web_app","text":"A","badge":7,"web_app":{"url":"u","color":"red"}}"#)
+///         .unwrap();
+/// let back = serde_json::to_value(&fresh).unwrap();
+/// assert_eq!(back["badge"], 7);
+/// assert_eq!(back["web_app"]["color"], "red");
 /// ```
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum MenuButton {
     /// Hide the button.
-    #[default]
-    Default,
+    Default {
+        /// Members this crate does not model, forwarded unchanged.
+        extra: Map<String, Value>,
+    },
     /// Show the bot's command list.
-    Commands,
+    Commands {
+        /// Members this crate does not model, forwarded unchanged.
+        extra: Map<String, Value>,
+    },
     /// Open a Mini App.
     WebApp {
         /// Button label.
         text: String,
         /// HTTPS URL of the Mini App.
         url: String,
+        /// Members this crate does not model, forwarded unchanged. Members of
+        /// a nested `web_app` object are kept under that key, next to `url`.
+        extra: Map<String, Value>,
     },
     /// A shape this crate does not model.
     Unknown(Value),
 }
 
+impl Default for MenuButton {
+    fn default() -> Self {
+        Self::default_menu()
+    }
+}
+
 impl MenuButton {
     /// Hide the menu button.
+    ///
+    /// ```
+    /// use telegram_api_client::MenuButton;
+    ///
+    /// assert_eq!(
+    ///     serde_json::to_value(MenuButton::default_menu()).unwrap(),
+    ///     serde_json::json!({ "type": "default" })
+    /// );
+    /// ```
     #[must_use]
     pub fn default_menu() -> Self {
-        Self::Default
+        Self::Default { extra: Map::new() }
     }
 
     /// Show the command list.
+    ///
+    /// ```
+    /// use telegram_api_client::MenuButton;
+    ///
+    /// assert_eq!(
+    ///     serde_json::to_value(MenuButton::commands()).unwrap(),
+    ///     serde_json::json!({ "type": "commands" })
+    /// );
+    /// ```
     #[must_use]
     pub fn commands() -> Self {
-        Self::Commands
+        Self::Commands { extra: Map::new() }
     }
 
     /// Open a Mini App.
+    ///
+    /// ```
+    /// use telegram_api_client::MenuButton;
+    ///
+    /// let button = MenuButton::web_app("Open", "https://example.com/app");
+    /// let json = serde_json::to_value(&button).unwrap();
+    /// assert_eq!(json["text"], "Open");
+    /// assert_eq!(json["web_app"]["url"], "https://example.com/app");
+    /// ```
     #[must_use]
     pub fn web_app(text: impl Into<String>, url: impl Into<String>) -> Self {
         Self::WebApp {
             text: text.into(),
             url: url.into(),
+            extra: Map::new(),
         }
+    }
+
+    /// The members a known variant does not model.
+    ///
+    /// `None` for [`MenuButton::Unknown`], whose whole payload is preserved.
+    ///
+    /// ```
+    /// use telegram_api_client::MenuButton;
+    ///
+    /// let button: MenuButton =
+    ///     serde_json::from_str(r#"{"type":"commands","badge":"new"}"#).unwrap();
+    /// let extra = button.extra().unwrap();
+    /// assert_eq!(extra["badge"], "new");
+    /// ```
+    #[must_use]
+    pub fn extra(&self) -> Option<&Map<String, Value>> {
+        match self {
+            Self::Default { extra } | Self::Commands { extra } | Self::WebApp { extra, .. } => {
+                Some(extra)
+            }
+            Self::Unknown(_) => None,
+        }
+    }
+
+    /// Adds a member this crate does not model.
+    ///
+    /// The member is written back unchanged; a known name is not displaced by
+    /// it. [`MenuButton::Unknown`] already carries its whole payload, so it
+    /// comes back untouched.
+    ///
+    /// ```
+    /// use telegram_api_client::MenuButton;
+    ///
+    /// let button = MenuButton::commands().with_extra("badge", serde_json::json!("new"));
+    /// let json = serde_json::to_value(&button).unwrap();
+    /// assert_eq!(json["type"], "commands");
+    /// assert_eq!(json["badge"], "new");
+    /// ```
+    #[must_use]
+    pub fn with_extra(mut self, key: impl Into<String>, value: Value) -> Self {
+        match &mut self {
+            Self::Default { extra } | Self::Commands { extra } | Self::WebApp { extra, .. } => {
+                extra.insert(key.into(), value);
+            }
+            Self::Unknown(_) => {}
+        }
+        self
+    }
+}
+
+/// Adds preserved members underneath the modelled ones, which keep their name.
+fn merge_extra(object: &mut Map<String, Value>, extra: &Map<String, Value>) {
+    for (key, value) in extra {
+        object.entry(key.clone()).or_insert_with(|| value.clone());
     }
 }
 
 impl Serialize for MenuButton {
     fn serialize<S: Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
+        let mut object = Map::new();
         match self {
-            Self::Default => json!({ "type": "default" }).serialize(serializer),
-            Self::Commands => json!({ "type": "commands" }).serialize(serializer),
-            Self::WebApp { text, url } => json!({
-                "type": "web_app",
-                "text": text,
-                "web_app": { "url": url },
-            })
-            .serialize(serializer),
-            Self::Unknown(value) => value.serialize(serializer),
+            Self::Default { extra } => {
+                object.insert("type".to_owned(), Value::from("default"));
+                merge_extra(&mut object, extra);
+            }
+            Self::Commands { extra } => {
+                object.insert("type".to_owned(), Value::from("commands"));
+                merge_extra(&mut object, extra);
+            }
+            Self::WebApp { text, url, extra } => {
+                object.insert("type".to_owned(), Value::from("web_app"));
+                object.insert("text".to_owned(), Value::String(text.clone()));
+                let mut web_app = Map::new();
+                web_app.insert("url".to_owned(), Value::String(url.clone()));
+                if let Some(preserved) = extra.get("web_app").and_then(Value::as_object) {
+                    merge_extra(&mut web_app, preserved);
+                }
+                object.insert("web_app".to_owned(), Value::Object(web_app));
+                merge_extra(&mut object, extra);
+            }
+            Self::Unknown(value) => return value.serialize(serializer),
         }
+        Value::Object(object).serialize(serializer)
     }
 }
 
 impl<'de> Deserialize<'de> for MenuButton {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
-        let value = Value::deserialize(deserializer)?;
-        Ok(match value.get("type").and_then(Value::as_str) {
-            Some("default") => Self::Default,
-            Some("commands") => Self::Commands,
-            Some("web_app") => {
-                let text = value
-                    .get("text")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_string();
-                let url = value
-                    .get("web_app")
-                    .and_then(|web_app| web_app.get("url"))
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_string();
-                Self::WebApp { text, url }
+        use serde::de::Error as _;
+
+        let mut object = match Value::deserialize(deserializer)? {
+            Value::Object(object) => object,
+            // Only an object carries a `type`; anything else is kept verbatim.
+            other => return Ok(Self::Unknown(other)),
+        };
+        let kind = object
+            .get("type")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        match kind.as_deref() {
+            Some("default") => {
+                object.remove("type");
+                Ok(Self::Default { extra: object })
             }
-            _ => Self::Unknown(value),
-        })
+            Some("commands") => {
+                object.remove("type");
+                Ok(Self::Commands { extra: object })
+            }
+            Some("web_app") => {
+                object.remove("type");
+                let Some(Value::String(text)) = object.remove("text") else {
+                    return Err(D::Error::custom("MenuButtonWebApp.text must be a string"));
+                };
+                let Some(Value::Object(mut web_app)) = object.remove("web_app") else {
+                    return Err(D::Error::custom(
+                        "MenuButtonWebApp.web_app must be an object",
+                    ));
+                };
+                let Some(Value::String(url)) = web_app.remove("url") else {
+                    return Err(D::Error::custom(
+                        "MenuButtonWebApp.web_app.url must be a string",
+                    ));
+                };
+                // Members next to `url` are preserved under the same key.
+                if !web_app.is_empty() {
+                    object.insert("web_app".to_owned(), Value::Object(web_app));
+                }
+                Ok(Self::WebApp {
+                    text,
+                    url,
+                    extra: object,
+                })
+            }
+            _ => Ok(Self::Unknown(Value::Object(object))),
+        }
     }
 }
 
@@ -530,15 +768,25 @@ impl SetChatMenuButton {
         }
     }
 
-    /// Checks the optional chat reference.
+    /// Checks the optional chat reference and the menu button payload.
     ///
     /// # Errors
     ///
-    /// [`Error::InvalidRequest`] for an unusable chat reference.
+    /// [`Error::InvalidRequest`] for an unusable chat reference, a `web_app`
+    /// button with a blank label or a non-HTTPS URL.
     pub fn validate(&self) -> Result<()> {
-        match self.chat_id.as_ref() {
-            Some(chat_id) => validate_chat("chat_id", chat_id),
-            None => Ok(()),
+        if let Some(chat_id) = self.chat_id.as_ref() {
+            validate_chat("chat_id", chat_id)?;
         }
+        if let MenuButton::WebApp { text, url, .. } = &self.menu_button {
+            if text.trim().is_empty() {
+                return Err(Error::InvalidRequest {
+                    field: "menu_button",
+                    reason: "text must not be empty".to_string(),
+                });
+            }
+            validate_https_url("menu_button", "web_app.url", url)?;
+        }
+        Ok(())
     }
 }

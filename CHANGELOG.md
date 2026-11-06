@@ -187,6 +187,18 @@ means for this API is spelled out in the README under
   keeps the body unambiguous — and that the client rejects the request before the
   transport sees a call. Doctests on `EditTarget`, `EditTarget::chat`,
   `EditTarget::inline` and `EditTarget::validate`.
+- **Callback and inline API payloads are validated before the wire** (#18-#20,
+  #22, #23). A known `web_app` menu button now requires string `text` and
+  `web_app.url` while decoding instead of fabricating empty strings; `commands`
+  and `default` keep every unmapped member in `extra`, and `web_app` keeps both
+  top-level and nested unmapped members, so known buttons round-trip without
+  losing future Bot API fields. `SetChatMenuButton::validate` rejects a blank
+  label or non-HTTPS Mini App URL. Callback text is measured in UTF-16 code
+  units, matching Telegram and the rest of the crate. `AnswerInlineQuery`
+  rejects a `next_offset` over 64 UTF-8 bytes and validates the optional result
+  button: non-empty label, exactly one of `start_parameter`/`web_app`, and a
+  1-64 byte ASCII `[A-Za-z0-9_-]` start parameter. Every check fails before a
+  transport call and names the offending field.
 
 ## [0.1.8] - 2026-10-28
 

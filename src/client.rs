@@ -956,7 +956,7 @@ impl<T: Transport> TelegramClient<T> {
         ///
         /// # async fn demo() -> telegram_api_client::Result<()> {
         /// let client = TelegramClient::new("123:ABC", MockTransport::new());
-        /// let request = SetChatMenuButton::global(MenuButton::Commands);
+        /// let request = SetChatMenuButton::global(MenuButton::commands());
         /// client.set_chat_menu_button(&request).await?;
         /// # Ok(()) }
         /// ```
