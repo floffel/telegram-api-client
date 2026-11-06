@@ -206,6 +206,28 @@ refused with `Error::InvalidRequest { field: "inline_message_id" }` instead
 | Source URL | <https://core.telegram.org/bots/api#editmessagetext> |
 | Fetched | 2026-11-02 |
 
+## `copyMessage` and `MessageId`
+
+Quote, `MessageId`: *"Unique message identifier. In specific instances (e.g.,
+message containing a video sent to a big chat), the server might automatically
+schedule a message instead of sending it immediately. In such cases, this field
+will be **0** and the relevant message will be unusable until it is actually
+sent."* Quote, `copyMessage`: *"Returns the `MessageId` of the sent message on
+success."*
+
+The crate therefore requires the `message_id` member during decoding and accepts
+`0` as the documented scheduled-copy state. `MessageId::is_pending()` reports
+that state. Negative values are rejected because no Telegram message id is
+negative. Omitted, `null`, mistyped and misspelled members are decode errors,
+not an implicit zero; `MessageId` deliberately has no `Default` implementation
+that could fabricate the same value.
+
+| Item | Value |
+| --- | --- |
+| Source URL | <https://core.telegram.org/bots/api#messageid> |
+| Source URL | <https://core.telegram.org/bots/api#copymessage> |
+| Fetched | 2026-11-06 |
+
 ## `MenuButton`
 
 Quote, "MenuButton": *"This object describes the bot's menu button in a private

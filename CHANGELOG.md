@@ -100,6 +100,14 @@ means for this API is spelled out in the README under
 
 ### Fixed
 
+- **`copyMessage` results require an explicit, non-negative `message_id`**
+  (#34). `MessageId.message_id` was `serde(default)`, so an omitted, null, or
+  misspelled member decoded as `0`, indistinguishable from Telegram's documented
+  scheduled-copy sentinel. The member is now required and rejects negative
+  values while still accepting `0`; `MessageId::is_pending()` identifies that
+  state. `MessageId` no longer implements `Default`, whose fabricated zero had
+  the same ambiguity. **Breaking** for callers that relied on the default or
+  decoded malformed results as zero.
 - **An answer is no longer copied before it is decoded** (#32). The client
   cloned `result` out of the envelope before deserializing, duplicating the
   whole subtree: a large or hostile answer cost its own size twice, and the copy

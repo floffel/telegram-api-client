@@ -344,6 +344,10 @@ compiling and fails loudly instead of silently dropping the file.
   counted in bytes; `InlineQueryResult::validate` checks one result, the answer
   checks the whole array and names the offending index). Violations are
   `Error::InvalidRequest { field, .. }` — no network call.
+- **`copyMessage` results are explicit.** `MessageId.message_id` is required and
+  must be non-negative. A `0` is Telegram's documented scheduled-copy sentinel
+  and is reported by `MessageId::is_pending()`; an omitted, null, mistyped or
+  negative id is a decoding error, never a fabricated default.
 - **429 is first class.** `Error::RateLimited { retry_after, .. }` keeps
   Telegram's `parameters.retry_after`; if only the description carries the hint
   it is parsed out, case-insensitively, from a scan that allocates nothing and is

@@ -969,12 +969,14 @@ impl<T: Transport> TelegramClient<T> {
         /// Copies a message without the forward label.
         ///
         /// ```
-        /// use telegram_api_client::{CopyMessage, MockTransport, TelegramClient};
+        /// use telegram_api_client::{CopyMessage, MockReply, MockTransport, TelegramClient};
         ///
         /// # async fn demo() -> telegram_api_client::Result<()> {
-        /// let client = TelegramClient::try_new("123:ABC", MockTransport::new()).unwrap();
+        /// let transport = MockTransport::new();
+        /// transport.push(MockReply::result(serde_json::json!({"message_id": 0})));
+        /// let client = TelegramClient::try_new("123:ABC", transport).unwrap();
         /// let created = client.copy_message(&CopyMessage::new(1, -1001, 7)).await?;
-        /// assert_eq!(created.message_id, 0);
+        /// assert!(created.is_pending(), "Telegram scheduled the copy");
         /// # Ok(()) }
         /// ```
         copy_message, "copyMessage", CopyMessage, MessageId
