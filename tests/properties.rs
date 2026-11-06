@@ -7,12 +7,13 @@ use std::time::Duration;
 use telegram_api_client::{
     guess_mime, is_idempotent, is_valid_mime, send::MAX_POLL_OPTION, AnswerCallbackQuery,
     AnswerInlineQuery, ChatId, ChatMember, ChatMemberPresence, ChatMemberStatus, CopyMessage,
-    EditMessageText, EditTarget, EntityKind, Error, File, GetFile, InlineQueryResult,
-    InlineQueryResultsButton, InputMedia, InputMediaKind, MenuButton, MessageEntity,
-    MessageReactionCountUpdated, MockTransport, MultipartFile, MultipartForm, ParseMode, PollType,
-    ReactionCount, RetryPolicy, SendMessage, SendPoll, TelegramClient, Update, UpdateCursor,
-    MAX_CALLBACK_TEXT, MAX_DOWNLOAD_BYTES, MAX_FILE_ID_BYTES, MAX_INLINE_NEXT_OFFSET_BYTES,
-    MAX_INLINE_START_PARAMETER_BYTES,
+    EditMessageMedia, EditMessageText, EditTarget, EntityKind, Error, File, GetFile,
+    InlineQueryResult, InlineQueryResultsButton, InputMedia, InputMediaKind, MenuButton,
+    MessageEntity, MessageReactionCountUpdated, MockTransport, MultipartFile, MultipartForm,
+    ParseMode, PollType, ReactionCount, RetryPolicy, SendAnimation, SendAudio, SendDocument,
+    SendMediaGroup, SendMessage, SendPhoto, SendPoll, SendVideo, SendVoice, TelegramClient, Update,
+    UpdateCursor, UploadFile, MAX_CALLBACK_TEXT, MAX_DOWNLOAD_BYTES, MAX_FILE_ID_BYTES,
+    MAX_INLINE_NEXT_OFFSET_BYTES, MAX_INLINE_START_PARAMETER_BYTES,
 };
 
 proptest! {
@@ -877,5 +878,80 @@ proptest! {
                 cursor.next_offset()
             );
         }
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig { cases: 96, ..ProptestConfig::default() })]
+
+    /// A media reference is only validated when nothing replaces it (#35): with
+    /// an upload any string passes, because the encoder rewrites the field;
+    /// without one the string is what Telegram resolves, so it must be neither
+    /// blank nor an `attach://` placeholder no part could satisfy.
+    #[test]
+    fn a_media_reference_is_valid_iff_nothing_replaces_it(reference in ".{0,24}") {
+        // The contract restated independently of the library's own predicate.
+        let trimmed = reference.trim();
+        let is_placeholder = trimmed
+            .get(..9)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("attach://"));
+        let json_only_is_valid = !trimmed.is_empty() && !is_placeholder;
+
+        macro_rules! assert_send {
+            ($request:ident, $field:literal, $mime:literal) => {{
+                prop_assert_eq!(
+                    $request::new(-1001_i64, reference.clone()).validate().is_ok(),
+                    json_only_is_valid,
+                    "{} without upload, reference {:?}",
+                    $field,
+                    reference
+                );
+
+                let uploaded = $request::new(-1001_i64, reference.clone())
+                    .with_upload(UploadFile::new("a.bin", vec![1]).with_mime($mime));
+                prop_assert!(
+                    uploaded.validate().is_ok(),
+                    "{} upload replaces {:?}, so it cannot be rejected",
+                    $field,
+                    reference
+                );
+            }};
+        }
+
+        assert_send!(SendPhoto, "photo", "image/png");
+        assert_send!(SendDocument, "document", "application/pdf");
+        assert_send!(SendAudio, "audio", "audio/mpeg");
+        assert_send!(SendVideo, "video", "video/mp4");
+        assert_send!(SendAnimation, "animation", "image/gif");
+        assert_send!(SendVoice, "voice", "audio/ogg");
+
+        let no_bytes = InputMedia::photo(reference.clone());
+        let edit = EditMessageMedia::new(-1001_i64, 7, no_bytes.clone());
+        prop_assert_eq!(edit.validate().is_ok(), json_only_is_valid);
+
+        let album = SendMediaGroup::new(
+            -1001_i64,
+            vec![no_bytes, InputMedia::photo("AgACAgI")],
+        );
+        prop_assert_eq!(album.validate().is_ok(), json_only_is_valid);
+
+        let with_bytes = InputMedia {
+            media: reference.clone(),
+            upload: Some(UploadFile::new("a.png", vec![1])),
+            ..InputMedia::photo("")
+        };
+        prop_assert!(
+            EditMessageMedia::new(-1001_i64, 7, with_bytes.clone())
+                .validate()
+                .is_ok()
+        );
+        prop_assert!(
+            SendMediaGroup::new(
+                -1001_i64,
+                vec![with_bytes, InputMedia::photo("AgACAgI")],
+            )
+            .validate()
+            .is_ok()
+        );
     }
 }

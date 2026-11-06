@@ -1097,6 +1097,10 @@ impl InputMedia {
 
     /// Uploads local bytes instead of referencing a `file_id` or URL.
     ///
+    /// The `media` value written here is a placeholder: the encoder attaches
+    /// the bytes as `file<index>` and rewrites `media` to `attach://file<index>`
+    /// on the way out, so the string itself never reaches Telegram.
+    ///
     /// ```rust
     /// use telegram_api_client::{InputMedia, UploadFile};
     ///

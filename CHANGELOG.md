@@ -88,6 +88,23 @@ means for this API is spelled out in the README under
   deprecated raw-envelope methods validate the result without cloning it. The
   transport-side limit above is the other half: nothing downstream can bound a
   value tree, so the bound has to be a byte count before parsing.
+- **A media reference is validated against the upload that replaces it** (#35).
+  `EditMessageMedia`, `SendMediaGroup` and every `sendX` rejected an empty media
+  string unconditionally, although the encoder replaces it: an upload becomes a
+  part and the reference is rewritten to `attach://file0` (or dropped in favour
+  of the part for a `sendX` parameter). So a correct request — bytes attached
+  and an empty placeholder — failed locally, while `attach://file0` with no
+  upload passed and reached Telegram with no part behind it. Validation now
+  follows the wire: with an upload the reference is a placeholder and anything
+  (empty included) is accepted, because it is discarded; without one it must
+  name a `file_id` or URL, so an empty value and an `attach://` placeholder
+  (either case) are `Error::InvalidRequest` naming the field. The check lives
+  in one shared helper, which is why the album path and the single-media path
+  cannot drift apart again. Album items without an upload keep their own
+  reference rule; nothing else got stricter. The `reason` texts for those two
+  cases are new ("must not be empty without an upload", "is an
+  attach:// placeholder, but this request carries no upload to attach"), and the
+  `with_upload` docs now say what actually reaches the wire.
 - **`with_source` keeps the cause for `NotSent` and `Transport`** (#41). The
   method only ever filled the `Ambiguous` slot, so a transport that reported
   `Error::not_sent("dns failed").with_source(io_error)` lost the DNS/TLS cause

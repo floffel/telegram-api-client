@@ -309,6 +309,12 @@ assert!(request.multipart_form().unwrap().is_some());
 * Empty files are refused before the request is built.
 * In albums every uploaded item is attached as `file0`, `file1`, … and the
   `media` array references them as `attach://file0`, exactly as documented.
+* A media reference and an upload are two halves of one field, and validation
+  follows the encoder instead of contradicting it: with bytes attached the
+  reference is a placeholder that gets rewritten (or dropped in favour of the
+  part), so an empty one is correct; without bytes it is what Telegram
+  resolves, so an empty value or an `attach://` placeholder is refused before
+  the call.
 * The encoded body is deterministic: `MultipartForm::boundary` is derived from
   the content (no `rand` dependency), so the wire format is testable byte for
   byte.
