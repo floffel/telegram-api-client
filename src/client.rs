@@ -47,6 +47,7 @@ use std::time::Duration;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use serde_json::json;
+use url::Url;
 
 use crate::callback::{AnswerCallbackQuery, AnswerInlineQuery, SetChatMenuButton};
 use crate::chat::{
@@ -393,7 +394,9 @@ impl<T: Transport> TelegramClient<T> {
     /// assert_eq!(proxy.method_url("getMe"), "https://proxy.test/bot1:A/getMe");
     ///
     /// // The download URL is built from the same base.
-    /// let file = File { file_path: Some("photos/a.jpg".into()), ..File::default() };
+    /// let file: File = serde_json::from_str(
+    ///     r#"{"file_id":"A","file_unique_id":"u","file_path":"photos/a.jpg"}"#,
+    /// ).unwrap();
     /// assert_eq!(
     ///     proxy.file_url(&file).ok().as_deref(),
     ///     Some("https://proxy.test/file/bot1:A/photos/a.jpg"),
@@ -436,25 +439,40 @@ impl<T: Transport> TelegramClient<T> {
     /// use telegram_api_client::{File, MockTransport, TelegramClient};
     ///
     /// let client = TelegramClient::new("123:ABC", MockTransport::new());
-    /// let file = File { file_path: Some("photos/a.jpg".into()), ..File::default() };
+    /// let file: File = serde_json::from_str(
+    ///     r#"{"file_id":"A","file_unique_id":"u","file_path":"photos/a.jpg"}"#,
+    /// ).unwrap();
     /// assert_eq!(
     ///     client.file_url(&file).unwrap(),
     ///     "https://api.telegram.org/file/bot123:ABC/photos/a.jpg",
     /// );
-    /// assert!(client.file_url(&File::default()).is_err());
+    /// let no_path: File = serde_json::from_str(
+    ///     r#"{"file_id":"A","file_unique_id":"u"}"#,
+    /// ).unwrap();
+    /// assert!(client.file_url(&no_path).is_err());
     /// ```
     pub fn file_url(&self, file: &File) -> Result<String> {
         let path = file.download_path().ok_or_else(|| Error::Unexpected {
             method: "getFile".to_string(),
-            detail: "response carried no `file_path` (file too large, or handle expired)"
+            detail: "response carried no usable `file_path` (file too large, handle expired, or invalid path)"
                 .to_string(),
         })?;
-        Ok(format!(
-            "{}/file/bot{}/{}",
-            self.base_url.trim_end_matches('/'),
-            self.token,
-            path.trim_start_matches('/')
-        ))
+        let mut url =
+            Url::parse(self.base_url.trim_end_matches('/')).map_err(|error| Error::Unexpected {
+                method: "getFile".to_string(),
+                detail: format!(
+                    "cannot build a download URL from the configured base URL: {error}"
+                ),
+            })?;
+        url.path_segments_mut()
+            .map_err(|()| Error::Unexpected {
+                method: "getFile".to_string(),
+                detail: "configured base URL cannot carry path segments".to_string(),
+            })?
+            .push("file")
+            .push(&format!("bot{}", self.token))
+            .extend(path.split('/'));
+        Ok(url.into())
     }
 
     /// Serializes `request` and posts it.

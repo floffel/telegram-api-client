@@ -6,9 +6,10 @@ use serde_json::{Map, Value};
 use std::time::Duration;
 use telegram_api_client::{
     guess_mime, is_idempotent, is_valid_mime, send::MAX_POLL_OPTION, ChatId, ChatMember,
-    ChatMemberPresence, ChatMemberStatus, EditTarget, EntityKind, Error, InputMedia,
-    InputMediaKind, MessageEntity, MultipartFile, MultipartForm, ParseMode, PollType, RetryPolicy,
-    SendMessage, SendPoll, Update, UpdateCursor,
+    ChatMemberPresence, ChatMemberStatus, EditTarget, EntityKind, Error, File, GetFile, InputMedia,
+    InputMediaKind, MessageEntity, MockTransport, MultipartFile, MultipartForm, ParseMode,
+    PollType, RetryPolicy, SendMessage, SendPoll, TelegramClient, Update, UpdateCursor,
+    MAX_DOWNLOAD_BYTES, MAX_FILE_ID_BYTES,
 };
 
 proptest! {
@@ -319,6 +320,75 @@ proptest! {
         }
         let back: InputMedia = serde_json::from_value(json).unwrap();
         prop_assert_eq!(back, media);
+    }
+
+    /// `GetFile` accepts exactly the documented file-id window and rejects
+    /// surrounding whitespace without silently rewriting the value.
+    #[test]
+    fn get_file_ids_are_trim_stable_and_bounded(id in "\\PC{0,320}") {
+        let request = GetFile::new(id.clone());
+        let expected = !id.trim().is_empty()
+            && id.trim() == id
+            && id.len() <= MAX_FILE_ID_BYTES
+            && !id.chars().any(char::is_control);
+        prop_assert_eq!(request.validate().is_ok(), expected, "{:?}", id);
+    }
+
+    /// Arbitrary relative path segments are either rejected as unsafe or
+    /// survive URL construction without changing URL syntax.
+    #[test]
+    fn file_paths_are_safe_and_encoded(
+        segments in prop::collection::vec(
+            "[A-Za-z0-9](?:[A-Za-z0-9 _.\\-]{0,18}[A-Za-z0-9])?",
+            1..5,
+        )
+    ) {
+        let path = segments.join("/");
+        let file: File = serde_json::from_value(serde_json::json!({
+            "file_id": "A",
+            "file_unique_id": "u",
+            "file_path": path,
+        })).unwrap();
+        let client = TelegramClient::new("1:A", MockTransport::new());
+        let url = client.file_url(&file).unwrap();
+        let parsed = url::Url::parse(&url).unwrap();
+        prop_assert_eq!(parsed.query(), None);
+        prop_assert_eq!(parsed.fragment(), None);
+        let expected_suffix = format!("/{}", segments.join("/").replace(' ', "%20"));
+        prop_assert!(parsed.path().ends_with(&expected_suffix));
+    }
+
+    /// Arbitrary file paths either validate as relative paths or are rejected;
+    /// accepted paths never gain URL query or fragment syntax.
+    #[test]
+    fn arbitrary_file_paths_are_rejected_or_safe(path in "\\PC{0,128}") {
+        let file = File {
+            file_id: "A".into(),
+            file_unique_id: "u".into(),
+            file_size: None,
+            file_path: Some(path),
+            extra: std::collections::BTreeMap::new(),
+        };
+        if let Some(path) = file.download_path() {
+            prop_assert!(!path.starts_with('/'));
+            prop_assert!(!path.contains(['?', '#', '\\']));
+            prop_assert!(!path.chars().any(char::is_control));
+            let client = TelegramClient::new("1:A", MockTransport::new());
+            let url = url::Url::parse(&client.file_url(&file).unwrap()).unwrap();
+            prop_assert_eq!(url.query(), None);
+            prop_assert_eq!(url.fragment(), None);
+        }
+    }
+
+    /// A reported size is exactly the inclusive 20 MB download decision.
+    #[test]
+    fn download_limit_matches_the_ceiling(size in any::<u64>()) {
+        let file: File = serde_json::from_value(serde_json::json!({
+            "file_id": "A",
+            "file_unique_id": "u",
+            "file_size": size,
+        })).unwrap();
+        prop_assert_eq!(file.fits_download_limit(), Some(size <= MAX_DOWNLOAD_BYTES as u64));
     }
 
     /// Every quiz keeps its correct answer inside the option list.
