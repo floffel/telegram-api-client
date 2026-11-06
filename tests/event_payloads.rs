@@ -29,10 +29,59 @@ fn reaction_kinds_answer_their_accessors() {
 
     // A kind from a future Bot API must parse and answer `None`, not error.
     let future = reaction(r#"{"type":"hologram","id":"x"}"#);
-    assert_eq!(future, ReactionType::Unknown);
+    assert_eq!(future.tag(), "hologram");
+    assert_eq!(
+        future.unknown_fields().and_then(|fields| fields.get("id")),
+        Some(&serde_json::json!("x"))
+    );
     assert_eq!(future.glyph(), None);
     assert_eq!(future.custom_emoji_id(), None);
-    assert_eq!(ReactionType::default(), ReactionType::Unknown);
+    assert_eq!(ReactionType::default().tag(), "unknown");
+    assert_eq!(
+        serde_json::to_value(&future).expect("serializable"),
+        serde_json::json!({"type":"hologram","id":"x"})
+    );
+}
+
+#[test]
+fn unknown_reactions_and_boost_sources_round_trip_without_losing_fields() {
+    let reaction: ReactionType = serde_json::from_value(serde_json::json!({
+        "type":"future_reaction",
+        "payload":{"nested":[{ "id": 7 }]},
+        "enabled":true
+    }))
+    .expect("unknown reaction parses");
+    assert_eq!(reaction.tag(), "future_reaction");
+    assert_eq!(
+        serde_json::to_value(&reaction).expect("round trip"),
+        serde_json::json!({
+            "type":"future_reaction",
+            "payload":{"nested":[{ "id": 7 }]},
+            "enabled":true
+        })
+    );
+
+    let source: ChatBoostSource = serde_json::from_value(serde_json::json!({
+        "source":"future_source",
+        "payload":{"nested":[1,false]},
+        "count":3
+    }))
+    .expect("unknown boost source parses");
+    assert_eq!(source.source_kind(), "future_source");
+    assert_eq!(
+        source
+            .unknown_fields()
+            .and_then(|fields| fields.get("payload")),
+        Some(&serde_json::json!({"nested":[1,false]}))
+    );
+    assert_eq!(
+        serde_json::to_value(&source).expect("round trip"),
+        serde_json::json!({
+            "source":"future_source",
+            "payload":{"nested":[1,false]},
+            "count":3
+        })
+    );
 }
 
 #[test]
@@ -123,9 +172,18 @@ fn boost_sources_are_tolerant_and_name_their_kind() {
 
     let future: ChatBoostSource =
         serde_json::from_str(r#"{"source":"telepathy","user":{"id":1}}"#).expect("future");
-    assert_eq!(future, ChatBoostSource::Unknown);
-    assert_eq!(future.source_kind(), "unknown");
+    assert_eq!(future.source_kind(), "telepathy");
+    assert_eq!(
+        future
+            .unknown_fields()
+            .and_then(|fields| fields.get("user")),
+        Some(&serde_json::json!({"id":1}))
+    );
     assert_eq!(future.user().map(|user| user.id), None);
+    assert_eq!(
+        serde_json::to_value(&future).expect("serializable"),
+        serde_json::json!({"source":"telepathy","user":{"id":1}})
+    );
 }
 
 fn member(status: ChatMemberStatus) -> ChatMember {

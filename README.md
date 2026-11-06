@@ -171,7 +171,17 @@ object), not hidden: `Update` parses unknown fields and unknown enum values
 without failing. Poll media is modelled: `Poll::media`,
 `Poll::explanation_media` and `PollOption::media` carry `PollMedia`, whose ten
 member objects (`Animation`, `Audio`, `Document`, `Link`, `LivePhoto`,
-`Location`, `PhotoSize[]`, `Sticker`, `Venue`, `Video`) are typed.
+`Location`, `PhotoSize[]`, `Sticker`, `Venue`, `Video`) are typed. `PollMedia`
+is a private one-of value with constructors and typed accessors; decoding
+requires exactly one non-empty member, preserves unknown member names and
+adjacent fields, and the four nested collections are capped at
+`MAX_MEDIA_COLLECTION_ITEMS` during decoding.
+
+Required media fields are required on decode rather than silently defaulting.
+`MaskPosition` keeps future point strings but validates finite shifts and a
+finite positive scale before serialization. Unknown `ReactionType` and
+`ChatBoostSource` tags retain their original tag and payload for lossless
+round-trips.
 
 ## Delivery semantics
 

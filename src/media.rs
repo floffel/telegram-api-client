@@ -1,10 +1,10 @@
 //! Media objects carried by poll questions, explanations and options.
 //!
-//! The Bot API models these as small, independent objects. [`PollMedia`] is not
-//! a tagged union: it is a flat object whose ten optional member fields may be
-//! present, and Telegram documents that at most one is present per object.
-//! Every type here ignores unknown fields, so a newer Bot API cannot break
-//! parsing.
+//! The Bot API models these as small, independent objects. [`PollMedia`] is a
+//! flat object with ten documented member fields, and Telegram documents that
+//! at most one is present per object. It is represented as an explicit one-of
+//! value: known members are typed, unknown members and adjacent fields are
+//! preserved for a lossless round trip.
 //!
 //! Numeric members are non-negative by construction: sizes are `u64`, pixel
 //! dimensions are `u32`, durations are `u64`. A payload that carries a negative
@@ -17,7 +17,9 @@
 //! ```
 //! use telegram_api_client::PhotoSize;
 //!
-//! let photo: PhotoSize = serde_json::from_str(r#"{"width":320,"height":240}"#).unwrap();
+//! let photo: PhotoSize = serde_json::from_str(
+//!     r#"{"file_id":"A","file_unique_id":"u","width":320,"height":240}"#,
+//! ).unwrap();
 //! assert_eq!(photo.width, 320);
 //!
 //! // `-1` is not repaired to `0`: nothing but a real count parses.
@@ -25,10 +27,119 @@
 //! assert!(serde_json::from_str::<PhotoSize>(r#"{"file_size":-1}"#).is_err());
 //! ```
 
-use serde::{Deserialize, Serialize};
+use std::fmt;
+
+use serde::de::{MapAccess, SeqAccess, Visitor};
+use serde::ser::SerializeMap;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde_json::{Map, Value};
 
 use crate::events::Location;
 use crate::file::File;
+
+/// Upper bound for arrays nested inside a poll media object.
+///
+/// Telegram does not publish a numeric maximum for these arrays. This local
+/// bound keeps a hostile webhook body from allocating an arbitrary number of
+/// elements while still leaving ample room for every documented media shape.
+pub const MAX_MEDIA_COLLECTION_ITEMS: usize = 100;
+
+struct BoundedVec<T>(Vec<T>);
+
+struct BoundedVecVisitor<T>(std::marker::PhantomData<T>);
+
+impl<'de, T> Visitor<'de> for BoundedVecVisitor<T>
+where
+    T: Deserialize<'de>,
+{
+    type Value = BoundedVec<T>;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "an array with at most {MAX_MEDIA_COLLECTION_ITEMS} items"
+        )
+    }
+
+    fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
+    where
+        A: SeqAccess<'de>,
+    {
+        // A size hint is attacker-controlled. Never reserve more than the
+        // accepted maximum, and enforce the maximum before growth.
+        let capacity = sequence
+            .size_hint()
+            .unwrap_or(0)
+            .min(MAX_MEDIA_COLLECTION_ITEMS);
+        let mut values = Vec::with_capacity(capacity);
+        while let Some(value) = sequence.next_element()? {
+            if values.len() == MAX_MEDIA_COLLECTION_ITEMS {
+                return Err(serde::de::Error::custom(format!(
+                    "media array exceeds the limit of {MAX_MEDIA_COLLECTION_ITEMS} items"
+                )));
+            }
+            values.push(value);
+        }
+        Ok(BoundedVec(values))
+    }
+}
+
+impl<'de, T> Deserialize<'de> for BoundedVec<T>
+where
+    T: Deserialize<'de>,
+{
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        deserializer.deserialize_seq(BoundedVecVisitor(std::marker::PhantomData))
+    }
+}
+
+struct OptionalBoundedVecVisitor<T>(std::marker::PhantomData<T>);
+
+impl<'de, T> Visitor<'de> for OptionalBoundedVecVisitor<T>
+where
+    T: Deserialize<'de>,
+{
+    type Value = Option<Vec<T>>;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "null or an array with at most {MAX_MEDIA_COLLECTION_ITEMS} items"
+        )
+    }
+
+    fn visit_none<E>(self) -> Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        Ok(None)
+    }
+
+    fn visit_unit<E>(self) -> Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        Ok(None)
+    }
+
+    fn visit_some<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        BoundedVec::<T>::deserialize(deserializer).map(|values| Some(values.0))
+    }
+}
+
+fn deserialize_optional_bounded_vec<'de, D, T>(deserializer: D) -> Result<Option<Vec<T>>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    deserializer.deserialize_option(OptionalBoundedVecVisitor(std::marker::PhantomData))
+}
 
 /// Why a numeric media member was refused while parsing.
 ///
@@ -151,11 +262,13 @@ where
 /// assert_eq!(photo.file_size, Some(12345));
 ///
 /// // The boundaries: zero and the type maximum parse, `-1` does not.
-/// let empty: PhotoSize = serde_json::from_str(r#"{"width":0,"height":0,"file_size":0}"#).unwrap();
+/// let empty: PhotoSize = serde_json::from_str(
+///     r#"{"file_id":"A","file_unique_id":"u","width":0,"height":0,"file_size":0}"#,
+/// ).unwrap();
 /// assert_eq!(empty.file_size, Some(0));
 ///
 /// let huge: PhotoSize = serde_json::from_str(
-///     r#"{"width":4294967295,"height":4294967295,"file_size":18446744073709551615}"#,
+///     r#"{"file_id":"A","file_unique_id":"u","width":4294967295,"height":4294967295,"file_size":18446744073709551615}"#,
 /// ).unwrap();
 /// assert_eq!(huge.width, u32::MAX);
 /// assert_eq!(huge.file_size, Some(u64::MAX));
@@ -168,16 +281,16 @@ where
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
 pub struct PhotoSize {
     /// Identifier usable to re-send the photo.
-    #[serde(default, alias = "fileId")]
+    #[serde(alias = "fileId")]
     pub file_id: String,
     /// Identifier stable across bots.
-    #[serde(default, alias = "fileUniqueId")]
+    #[serde(alias = "fileUniqueId")]
     pub file_unique_id: String,
     /// Photo width in pixels; negative input is rejected.
-    #[serde(default, deserialize_with = "deserialize_width")]
+    #[serde(deserialize_with = "deserialize_width")]
     pub width: u32,
     /// Photo height in pixels; negative input is rejected.
-    #[serde(default, deserialize_with = "deserialize_height")]
+    #[serde(deserialize_with = "deserialize_height")]
     pub height: u32,
     /// Photo size in bytes, when known; negative input is rejected.
     #[serde(
@@ -200,7 +313,6 @@ pub struct PhotoSize {
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
 pub struct Link {
     /// URL of the link.
-    #[serde(default)]
     pub url: String,
 }
 
@@ -219,7 +331,7 @@ pub struct Link {
 ///
 /// // Boundaries: zero and the maximum parse, a negative number does not.
 /// let still: LivePhoto = serde_json::from_str(
-///     r#"{"width":0,"height":0,"duration":0,"file_size":18446744073709551615}"#,
+///     r#"{"file_id":"A","file_unique_id":"u","width":0,"height":0,"duration":0,"file_size":18446744073709551615}"#,
 /// ).unwrap();
 /// assert_eq!(still.file_size, Some(u64::MAX));
 ///
@@ -229,22 +341,26 @@ pub struct Link {
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
 pub struct LivePhoto {
     /// Photo part of the live photo.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_bounded_vec",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub photo: Option<Vec<PhotoSize>>,
     /// Identifier usable to re-send the live photo.
-    #[serde(default, alias = "fileId")]
+    #[serde(alias = "fileId")]
     pub file_id: String,
     /// Identifier stable across bots.
-    #[serde(default, alias = "fileUniqueId")]
+    #[serde(alias = "fileUniqueId")]
     pub file_unique_id: String,
     /// Video width in pixels; negative input is rejected.
-    #[serde(default, deserialize_with = "deserialize_width")]
+    #[serde(deserialize_with = "deserialize_width")]
     pub width: u32,
     /// Video height in pixels; negative input is rejected.
-    #[serde(default, deserialize_with = "deserialize_height")]
+    #[serde(deserialize_with = "deserialize_height")]
     pub height: u32,
     /// Duration in seconds; negative input is rejected.
-    #[serde(default, deserialize_with = "deserialize_duration")]
+    #[serde(deserialize_with = "deserialize_duration")]
     pub duration: u64,
     /// MIME type of the video, when known.
     #[serde(default, alias = "mimeType", skip_serializing_if = "Option::is_none")]
@@ -274,10 +390,12 @@ pub struct LivePhoto {
 ///
 /// // Boundaries: zero and the maximum parse, a negative number does not.
 /// let blank: Animation = serde_json::from_str(
-///     r#"{"width":0,"height":0,"duration":0,"file_size":0}"#,
+///     r#"{"file_id":"A","file_unique_id":"u","width":0,"height":0,"duration":0,"file_size":0}"#,
 /// ).unwrap();
 /// assert_eq!(blank.file_size, Some(0));
-/// let widest: Animation = serde_json::from_str(r#"{"width":4294967295}"#).unwrap();
+/// let widest: Animation = serde_json::from_str(
+///     r#"{"file_id":"A","file_unique_id":"u","width":4294967295,"height":0,"duration":0}"#,
+/// ).unwrap();
 /// assert_eq!(widest.width, u32::MAX);
 ///
 /// assert!(serde_json::from_str::<Animation>(r#"{"height":-1}"#).is_err());
@@ -286,19 +404,19 @@ pub struct LivePhoto {
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
 pub struct Animation {
     /// Identifier usable to re-send the animation.
-    #[serde(default, alias = "fileId")]
+    #[serde(alias = "fileId")]
     pub file_id: String,
     /// Identifier stable across bots.
-    #[serde(default, alias = "fileUniqueId")]
+    #[serde(alias = "fileUniqueId")]
     pub file_unique_id: String,
     /// Animation width in pixels; negative input is rejected.
-    #[serde(default, deserialize_with = "deserialize_width")]
+    #[serde(deserialize_with = "deserialize_width")]
     pub width: u32,
     /// Animation height in pixels; negative input is rejected.
-    #[serde(default, deserialize_with = "deserialize_height")]
+    #[serde(deserialize_with = "deserialize_height")]
     pub height: u32,
     /// Duration in seconds; negative input is rejected.
-    #[serde(default, deserialize_with = "deserialize_duration")]
+    #[serde(deserialize_with = "deserialize_duration")]
     pub duration: u64,
     /// Thumbnail of the animation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -334,7 +452,7 @@ pub struct Animation {
 ///
 /// // Boundaries: zero and the maximum parse, a negative number does not.
 /// let silent: Audio = serde_json::from_str(
-///     r#"{"duration":0,"file_size":18446744073709551615}"#,
+///     r#"{"file_id":"A","file_unique_id":"u","duration":0,"file_size":18446744073709551615}"#,
 /// ).unwrap();
 /// assert_eq!(silent.file_size, Some(u64::MAX));
 ///
@@ -344,13 +462,13 @@ pub struct Animation {
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
 pub struct Audio {
     /// Identifier usable to re-send the audio.
-    #[serde(default, alias = "fileId")]
+    #[serde(alias = "fileId")]
     pub file_id: String,
     /// Identifier stable across bots.
-    #[serde(default, alias = "fileUniqueId")]
+    #[serde(alias = "fileUniqueId")]
     pub file_unique_id: String,
     /// Duration in seconds; negative input is rejected.
-    #[serde(default, deserialize_with = "deserialize_duration")]
+    #[serde(deserialize_with = "deserialize_duration")]
     pub duration: u64,
     /// Performer, when known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -390,10 +508,12 @@ pub struct Audio {
 /// assert_eq!(document.file_name.as_deref(), Some("a.pdf"));
 ///
 /// // Boundaries: an empty and an oversized file parse, a negative one does not.
-/// let empty: Document = serde_json::from_str(r#"{"file_size":0}"#).unwrap();
+/// let empty: Document =
+///     serde_json::from_str(r#"{"file_id":"A","file_unique_id":"u","file_size":0}"#).unwrap();
 /// assert_eq!(empty.file_size, Some(0));
 /// let largest: Document =
-///     serde_json::from_str(r#"{"file_size":18446744073709551615}"#).unwrap();
+///     serde_json::from_str(r#"{"file_id":"A","file_unique_id":"u","file_size":18446744073709551615}"#)
+///         .unwrap();
 /// assert_eq!(largest.file_size, Some(u64::MAX));
 ///
 /// assert!(serde_json::from_str::<Document>(r#"{"file_size":-1}"#).is_err());
@@ -401,10 +521,10 @@ pub struct Audio {
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
 pub struct Document {
     /// Identifier usable to re-send the document.
-    #[serde(default, alias = "fileId")]
+    #[serde(alias = "fileId")]
     pub file_id: String,
     /// Identifier stable across bots.
-    #[serde(default, alias = "fileUniqueId")]
+    #[serde(alias = "fileUniqueId")]
     pub file_unique_id: String,
     /// Thumbnail of the document.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -438,13 +558,10 @@ pub struct Document {
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
 pub struct Venue {
     /// Geographical location of the venue.
-    #[serde(default)]
     pub location: Location,
     /// Venue name.
-    #[serde(default)]
     pub title: String,
     /// Venue address.
-    #[serde(default)]
     pub address: String,
     /// Foursquare identifier, when known.
     #[serde(
@@ -491,10 +608,12 @@ pub struct Venue {
 ///
 /// // Boundaries: zero and the maximum parse, a negative number does not.
 /// let smallest: VideoQuality =
-///     serde_json::from_str(r#"{"width":0,"height":0,"file_size":0}"#).unwrap();
+///     serde_json::from_str(r#"{"file_id":"A","file_unique_id":"u","width":0,"height":0,"codec":"h264","file_size":0}"#)
+///         .unwrap();
 /// assert_eq!(smallest.width, 0);
 /// let largest: VideoQuality =
-///     serde_json::from_str(r#"{"width":4294967295,"height":4294967295}"#).unwrap();
+///     serde_json::from_str(r#"{"file_id":"A","file_unique_id":"u","width":4294967295,"height":4294967295,"codec":"h264"}"#)
+///         .unwrap();
 /// assert_eq!(largest.height, u32::MAX);
 ///
 /// assert!(serde_json::from_str::<VideoQuality>(r#"{"width":-1}"#).is_err());
@@ -503,19 +622,18 @@ pub struct Venue {
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
 pub struct VideoQuality {
     /// Identifier usable to re-send this quality.
-    #[serde(default, alias = "fileId")]
+    #[serde(alias = "fileId")]
     pub file_id: String,
     /// Identifier stable across bots.
-    #[serde(default, alias = "fileUniqueId")]
+    #[serde(alias = "fileUniqueId")]
     pub file_unique_id: String,
     /// Video width in pixels; negative input is rejected.
-    #[serde(default, deserialize_with = "deserialize_width")]
+    #[serde(deserialize_with = "deserialize_width")]
     pub width: u32,
     /// Video height in pixels; negative input is rejected.
-    #[serde(default, deserialize_with = "deserialize_height")]
+    #[serde(deserialize_with = "deserialize_height")]
     pub height: u32,
     /// Video codec.
-    #[serde(default)]
     pub codec: String,
     /// File size in bytes, when known; negative input is rejected.
     #[serde(
@@ -542,11 +660,12 @@ pub struct VideoQuality {
 ///
 /// // Boundaries: zero and the maximum parse, a negative number does not.
 /// let smallest: Video = serde_json::from_str(
-///     r#"{"width":0,"height":0,"duration":0,"start_timestamp":0,"file_size":0}"#,
+///     r#"{"file_id":"A","file_unique_id":"u","width":0,"height":0,"duration":0,"start_timestamp":0,"file_size":0}"#,
 /// ).unwrap();
 /// assert_eq!(smallest.start_timestamp, Some(0));
 /// let longest: Video =
-///     serde_json::from_str(r#"{"duration":18446744073709551615}"#).unwrap();
+///     serde_json::from_str(r#"{"file_id":"A","file_unique_id":"u","width":0,"height":0,"duration":18446744073709551615}"#)
+///         .unwrap();
 /// assert_eq!(longest.duration, u64::MAX);
 ///
 /// assert!(serde_json::from_str::<Video>(r#"{"width":-1}"#).is_err());
@@ -555,25 +674,29 @@ pub struct VideoQuality {
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
 pub struct Video {
     /// Identifier usable to re-send the video.
-    #[serde(default, alias = "fileId")]
+    #[serde(alias = "fileId")]
     pub file_id: String,
     /// Identifier stable across bots.
-    #[serde(default, alias = "fileUniqueId")]
+    #[serde(alias = "fileUniqueId")]
     pub file_unique_id: String,
     /// Video width in pixels; negative input is rejected.
-    #[serde(default, deserialize_with = "deserialize_width")]
+    #[serde(deserialize_with = "deserialize_width")]
     pub width: u32,
     /// Video height in pixels; negative input is rejected.
-    #[serde(default, deserialize_with = "deserialize_height")]
+    #[serde(deserialize_with = "deserialize_height")]
     pub height: u32,
     /// Duration in seconds; negative input is rejected.
-    #[serde(default, deserialize_with = "deserialize_duration")]
+    #[serde(deserialize_with = "deserialize_duration")]
     pub duration: u64,
     /// Thumbnail of the video.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thumbnail: Option<PhotoSize>,
     /// Covers available for the video.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_bounded_vec",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub cover: Option<Vec<PhotoSize>>,
     /// Timestamp of the cover in the video, when known; negative input is
     /// rejected.
@@ -585,7 +708,11 @@ pub struct Video {
     )]
     pub start_timestamp: Option<u64>,
     /// Available encoded qualities.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_bounded_vec",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub qualities: Option<Vec<VideoQuality>>,
     /// Original file name, when known.
     #[serde(default, alias = "fileName", skip_serializing_if = "Option::is_none")]
@@ -603,30 +730,160 @@ pub struct Video {
     pub file_size: Option<u64>,
 }
 
+/// The part of a face a mask is positioned against.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum MaskPoint {
+    /// The forehead.
+    Forehead,
+    /// The eyes.
+    Eyes,
+    /// The mouth.
+    Mouth,
+    /// The chin.
+    Chin,
+    /// A part this crate does not know yet, preserved verbatim.
+    Unknown(String),
+}
+
+impl MaskPoint {
+    /// The wire spelling of this point.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::Forehead => "forehead",
+            Self::Eyes => "eyes",
+            Self::Mouth => "mouth",
+            Self::Chin => "chin",
+            Self::Unknown(value) => value,
+        }
+    }
+}
+
+impl Serialize for MaskPoint {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for MaskPoint {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Ok(match value.as_str() {
+            "forehead" => Self::Forehead,
+            "eyes" => Self::Eyes,
+            "mouth" => Self::Mouth,
+            "chin" => Self::Chin,
+            _ => Self::Unknown(value),
+        })
+    }
+}
+
 /// Where a mask is positioned on a sticker face.
 ///
 /// ```
-/// use telegram_api_client::MaskPosition;
+/// use telegram_api_client::{MaskPoint, MaskPosition};
 ///
 /// let position: MaskPosition = serde_json::from_str(
 ///     r#"{"point":"eyes","x_shift":0.1,"y_shift":-0.2,"scale":1.5}"#,
 /// ).unwrap();
-/// assert_eq!(position.point, "eyes");
+/// assert_eq!(position.point, MaskPoint::Eyes);
 /// ```
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[derive(Debug, Clone)]
 pub struct MaskPosition {
-    /// One of `forehead`, `eyes`, `mouth` or `chin`.
-    #[serde(default)]
-    pub point: String,
+    /// The face part; future values are preserved as [`MaskPoint::Unknown`].
+    pub point: MaskPoint,
     /// Horizontal shift from the mask point.
-    #[serde(default, alias = "xShift")]
     pub x_shift: f64,
     /// Vertical shift from the mask point.
-    #[serde(default, alias = "yShift")]
     pub y_shift: f64,
-    /// Scale of the mask.
-    #[serde(default)]
+    /// Positive scale of the mask.
     pub scale: f64,
+}
+
+impl MaskPosition {
+    /// Checks the point and floating-point members before they reach the wire.
+    ///
+    /// # Errors
+    ///
+    /// [`crate::Error::InvalidRequest`] when the point is empty, a shift is
+    /// non-finite, or the scale is non-finite or non-positive.
+    pub fn validate(&self) -> crate::Result<()> {
+        if self.point.as_str().is_empty() {
+            return Err(crate::Error::InvalidRequest {
+                field: "mask_position.point",
+                reason: "must not be empty".to_string(),
+            });
+        }
+        if !self.x_shift.is_finite() {
+            return Err(crate::Error::InvalidRequest {
+                field: "mask_position.x_shift",
+                reason: "must be finite".to_string(),
+            });
+        }
+        if !self.y_shift.is_finite() {
+            return Err(crate::Error::InvalidRequest {
+                field: "mask_position.y_shift",
+                reason: "must be finite".to_string(),
+            });
+        }
+        if !self.scale.is_finite() || self.scale <= 0.0 {
+            return Err(crate::Error::InvalidRequest {
+                field: "mask_position.scale",
+                reason: "must be finite and greater than zero".to_string(),
+            });
+        }
+        Ok(())
+    }
+}
+
+#[derive(Deserialize, Serialize)]
+struct MaskPositionWire {
+    point: MaskPoint,
+    #[serde(alias = "xShift")]
+    x_shift: f64,
+    #[serde(alias = "yShift")]
+    y_shift: f64,
+    scale: f64,
+}
+
+impl Serialize for MaskPosition {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        self.validate().map_err(serde::ser::Error::custom)?;
+        MaskPositionWire {
+            point: self.point.clone(),
+            x_shift: self.x_shift,
+            y_shift: self.y_shift,
+            scale: self.scale,
+        }
+        .serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for MaskPosition {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let wire = MaskPositionWire::deserialize(deserializer)?;
+        let position = Self {
+            point: wire.point,
+            x_shift: wire.x_shift,
+            y_shift: wire.y_shift,
+            scale: wire.scale,
+        };
+        position.validate().map_err(serde::de::Error::custom)?;
+        Ok(position)
+    }
 }
 
 /// Compares the raw bits of the floating-point fields, so the type stays
@@ -657,10 +914,12 @@ impl Eq for MaskPosition {}
 ///
 /// // Boundaries: zero and the maximum parse, a negative number does not.
 /// let empty: Sticker =
-///     serde_json::from_str(r#"{"width":0,"height":0,"file_size":0}"#).unwrap();
+///     serde_json::from_str(r#"{"file_id":"A","file_unique_id":"u","type":"regular","width":0,"height":0,"is_animated":false,"is_video":false,"file_size":0}"#)
+///         .unwrap();
 /// assert_eq!(empty.file_size, Some(0));
 /// let biggest: Sticker =
-///     serde_json::from_str(r#"{"width":4294967295,"height":4294967295}"#).unwrap();
+///     serde_json::from_str(r#"{"file_id":"A","file_unique_id":"u","type":"regular","width":4294967295,"height":4294967295,"is_animated":false,"is_video":false}"#)
+///         .unwrap();
 /// assert_eq!(biggest.width, u32::MAX);
 ///
 /// assert!(serde_json::from_str::<Sticker>(r#"{"height":-1}"#).is_err());
@@ -669,25 +928,25 @@ impl Eq for MaskPosition {}
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
 pub struct Sticker {
     /// Identifier usable to re-send the sticker.
-    #[serde(default, alias = "fileId")]
+    #[serde(alias = "fileId")]
     pub file_id: String,
     /// Identifier stable across bots.
-    #[serde(default, alias = "fileUniqueId")]
+    #[serde(alias = "fileUniqueId")]
     pub file_unique_id: String,
     /// Sticker width in pixels; negative input is rejected.
-    #[serde(default, deserialize_with = "deserialize_width")]
+    #[serde(deserialize_with = "deserialize_width")]
     pub width: u32,
     /// Sticker height in pixels; negative input is rejected.
-    #[serde(default, deserialize_with = "deserialize_height")]
+    #[serde(deserialize_with = "deserialize_height")]
     pub height: u32,
     /// Whether the sticker is animated.
-    #[serde(default, alias = "isAnimated")]
+    #[serde(alias = "isAnimated")]
     pub is_animated: bool,
     /// Whether the sticker is a video.
-    #[serde(default, alias = "isVideo")]
+    #[serde(alias = "isVideo")]
     pub is_video: bool,
     /// Sticker type, serialized as `type` on the wire.
-    #[serde(default, rename = "type", alias = "stickerType")]
+    #[serde(rename = "type", alias = "stickerType")]
     pub sticker_type: String,
     /// Thumbnail of the sticker.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -739,107 +998,402 @@ pub struct Sticker {
 /// The media attached to a poll question, explanation or option.
 ///
 /// The Bot API documents that at most one member field is present in any given
-/// object, but this is a flat object rather than a tagged union.
+/// object. This type stores exactly one member and creates it through a
+/// constructor, so a zero-member or multi-member value cannot be built through
+/// the supported API. Unknown members are retained verbatim.
 ///
 /// ```
 /// use telegram_api_client::{PollMedia, PollMediaKind};
 ///
 /// let media: PollMedia = serde_json::from_str(r#"{"link":{"url":"https://example.com/x"}}"#).unwrap();
-/// assert_eq!(media.kind(), Some(PollMediaKind::Link));
-/// assert!(!media.is_empty());
+/// assert_eq!(media.kind(), PollMediaKind::Link);
 /// ```
-#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PollMedia {
-    /// Animation member.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub animation: Option<Animation>,
-    /// Audio member.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub audio: Option<Audio>,
-    /// Document member.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub document: Option<Document>,
-    /// Link member.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub link: Option<Link>,
-    /// Live photo member.
-    #[serde(default, alias = "livePhoto", skip_serializing_if = "Option::is_none")]
-    pub live_photo: Option<LivePhoto>,
-    /// Location member.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub location: Option<Location>,
-    /// Photo member.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub photo: Option<Vec<PhotoSize>>,
-    /// Sticker member.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub sticker: Option<Sticker>,
-    /// Venue member.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub venue: Option<Venue>,
-    /// Video member.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub video: Option<Video>,
+    member: PollMediaMember,
+    extra: Map<String, Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PollMediaMember {
+    Animation(Animation),
+    Audio(Audio),
+    Document(Document),
+    Link(Link),
+    LivePhoto(LivePhoto),
+    Location(Location),
+    Photo(Vec<PhotoSize>),
+    Sticker(Sticker),
+    Venue(Venue),
+    Video(Video),
+    Unknown { tag: String, value: Value },
+}
+
+impl PollMediaMember {
+    fn kind(&self) -> PollMediaKind {
+        match self {
+            Self::Animation(_) => PollMediaKind::Animation,
+            Self::Audio(_) => PollMediaKind::Audio,
+            Self::Document(_) => PollMediaKind::Document,
+            Self::Link(_) => PollMediaKind::Link,
+            Self::LivePhoto(_) => PollMediaKind::LivePhoto,
+            Self::Location(_) => PollMediaKind::Location,
+            Self::Photo(_) => PollMediaKind::Photo,
+            Self::Sticker(_) => PollMediaKind::Sticker,
+            Self::Venue(_) => PollMediaKind::Venue,
+            Self::Video(_) => PollMediaKind::Video,
+            Self::Unknown { .. } => PollMediaKind::Unknown,
+        }
+    }
+
+    fn tag(&self) -> &str {
+        match self {
+            Self::Animation(_) => "animation",
+            Self::Audio(_) => "audio",
+            Self::Document(_) => "document",
+            Self::Link(_) => "link",
+            Self::LivePhoto(_) => "live_photo",
+            Self::Location(_) => "location",
+            Self::Photo(_) => "photo",
+            Self::Sticker(_) => "sticker",
+            Self::Venue(_) => "venue",
+            Self::Video(_) => "video",
+            Self::Unknown { tag, .. } => tag,
+        }
+    }
 }
 
 impl PollMedia {
-    /// Whether all ten member fields are absent.
-    ///
-    /// ```
-    /// use telegram_api_client::PollMedia;
-    ///
-    /// assert!(PollMedia::default().is_empty());
-    /// ```
+    /// Wraps an animation member.
     #[must_use]
-    pub fn is_empty(&self) -> bool {
-        self.animation.is_none()
-            && self.audio.is_none()
-            && self.document.is_none()
-            && self.link.is_none()
-            && self.live_photo.is_none()
-            && self.location.is_none()
-            && self.photo.is_none()
-            && self.sticker.is_none()
-            && self.venue.is_none()
-            && self.video.is_none()
+    pub fn animation(value: Animation) -> Self {
+        Self::from_member(PollMediaMember::Animation(value))
     }
 
-    /// The first present member in documented field order.
-    ///
-    /// Telegram never documents more than one present member, but if a payload
-    /// carries several this method deterministically returns the first one.
-    ///
-    /// ```
-    /// use telegram_api_client::{PollMedia, PollMediaKind};
-    ///
-    /// let media: PollMedia = serde_json::from_str(r#"{"video":{}}"#).unwrap();
-    /// assert_eq!(media.kind(), Some(PollMediaKind::Video));
-    /// ```
+    /// Wraps an audio member.
     #[must_use]
-    pub fn kind(&self) -> Option<PollMediaKind> {
-        if self.animation.is_some() {
-            Some(PollMediaKind::Animation)
-        } else if self.audio.is_some() {
-            Some(PollMediaKind::Audio)
-        } else if self.document.is_some() {
-            Some(PollMediaKind::Document)
-        } else if self.link.is_some() {
-            Some(PollMediaKind::Link)
-        } else if self.live_photo.is_some() {
-            Some(PollMediaKind::LivePhoto)
-        } else if self.location.is_some() {
-            Some(PollMediaKind::Location)
-        } else if self.photo.is_some() {
-            Some(PollMediaKind::Photo)
-        } else if self.sticker.is_some() {
-            Some(PollMediaKind::Sticker)
-        } else if self.venue.is_some() {
-            Some(PollMediaKind::Venue)
-        } else if self.video.is_some() {
-            Some(PollMediaKind::Video)
-        } else {
-            None
+    pub fn audio(value: Audio) -> Self {
+        Self::from_member(PollMediaMember::Audio(value))
+    }
+
+    /// Wraps a document member.
+    #[must_use]
+    pub fn document(value: Document) -> Self {
+        Self::from_member(PollMediaMember::Document(value))
+    }
+
+    /// Wraps a link member.
+    #[must_use]
+    pub fn link(value: Link) -> Self {
+        Self::from_member(PollMediaMember::Link(value))
+    }
+
+    /// Wraps a live-photo member.
+    #[must_use]
+    pub fn live_photo(value: LivePhoto) -> Self {
+        Self::from_member(PollMediaMember::LivePhoto(value))
+    }
+
+    /// Wraps a location member.
+    #[must_use]
+    pub fn location(value: Location) -> Self {
+        Self::from_member(PollMediaMember::Location(value))
+    }
+
+    /// Wraps a non-empty photo array.
+    ///
+    /// # Errors
+    ///
+    /// [`crate::Error::InvalidRequest`] when `value` is empty.
+    pub fn photo(value: Vec<PhotoSize>) -> crate::Result<Self> {
+        if value.is_empty() || value.len() > MAX_MEDIA_COLLECTION_ITEMS {
+            return Err(crate::Error::InvalidRequest {
+                field: "poll_media.photo",
+                reason: format!("must contain between 1 and {MAX_MEDIA_COLLECTION_ITEMS} items"),
+            });
         }
+        Ok(Self::from_member(PollMediaMember::Photo(value)))
+    }
+
+    /// Wraps a sticker member.
+    #[must_use]
+    pub fn sticker(value: Sticker) -> Self {
+        Self::from_member(PollMediaMember::Sticker(value))
+    }
+
+    /// Wraps a venue member.
+    #[must_use]
+    pub fn venue(value: Venue) -> Self {
+        Self::from_member(PollMediaMember::Venue(value))
+    }
+
+    /// Wraps a video member.
+    #[must_use]
+    pub fn video(value: Video) -> Self {
+        Self::from_member(PollMediaMember::Video(value))
+    }
+
+    /// The member kind carried by this object.
+    #[must_use]
+    pub fn kind(&self) -> PollMediaKind {
+        self.member.kind()
+    }
+
+    /// The wire tag of the member.
+    #[must_use]
+    pub fn tag(&self) -> &str {
+        self.member.tag()
+    }
+
+    /// The animation, when this carries one.
+    #[must_use]
+    pub fn animation_value(&self) -> Option<&Animation> {
+        match &self.member {
+            PollMediaMember::Animation(value) => Some(value),
+            _ => None,
+        }
+    }
+
+    /// The audio, when this carries one.
+    #[must_use]
+    pub fn audio_value(&self) -> Option<&Audio> {
+        match &self.member {
+            PollMediaMember::Audio(value) => Some(value),
+            _ => None,
+        }
+    }
+
+    /// The document, when this carries one.
+    #[must_use]
+    pub fn document_value(&self) -> Option<&Document> {
+        match &self.member {
+            PollMediaMember::Document(value) => Some(value),
+            _ => None,
+        }
+    }
+
+    /// The link, when this carries one.
+    #[must_use]
+    pub fn link_value(&self) -> Option<&Link> {
+        match &self.member {
+            PollMediaMember::Link(value) => Some(value),
+            _ => None,
+        }
+    }
+
+    /// The live photo, when this carries one.
+    #[must_use]
+    pub fn live_photo_value(&self) -> Option<&LivePhoto> {
+        match &self.member {
+            PollMediaMember::LivePhoto(value) => Some(value),
+            _ => None,
+        }
+    }
+
+    /// The location, when this carries one.
+    #[must_use]
+    pub fn location_value(&self) -> Option<&Location> {
+        match &self.member {
+            PollMediaMember::Location(value) => Some(value),
+            _ => None,
+        }
+    }
+
+    /// The photo sizes, when this carries them.
+    #[must_use]
+    pub fn photo_value(&self) -> Option<&[PhotoSize]> {
+        match &self.member {
+            PollMediaMember::Photo(value) => Some(value),
+            _ => None,
+        }
+    }
+
+    /// The sticker, when this carries one.
+    #[must_use]
+    pub fn sticker_value(&self) -> Option<&Sticker> {
+        match &self.member {
+            PollMediaMember::Sticker(value) => Some(value),
+            _ => None,
+        }
+    }
+
+    /// The venue, when this carries one.
+    #[must_use]
+    pub fn venue_value(&self) -> Option<&Venue> {
+        match &self.member {
+            PollMediaMember::Venue(value) => Some(value),
+            _ => None,
+        }
+    }
+
+    /// The video, when this carries one.
+    #[must_use]
+    pub fn video_value(&self) -> Option<&Video> {
+        match &self.member {
+            PollMediaMember::Video(value) => Some(value),
+            _ => None,
+        }
+    }
+
+    /// The unknown member value, when this carries one.
+    #[must_use]
+    pub fn unknown_value(&self) -> Option<&Value> {
+        match &self.member {
+            PollMediaMember::Unknown { value, .. } => Some(value),
+            _ => None,
+        }
+    }
+
+    /// Additional fields preserved alongside the selected member.
+    #[must_use]
+    pub fn extra_fields(&self) -> &Map<String, Value> {
+        &self.extra
+    }
+
+    fn from_member(member: PollMediaMember) -> Self {
+        Self {
+            member,
+            extra: Map::new(),
+        }
+    }
+}
+
+impl Serialize for PollMedia {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        if let PollMediaMember::Photo(photos) = &self.member {
+            if photos.is_empty() || photos.len() > MAX_MEDIA_COLLECTION_ITEMS {
+                return Err(serde::ser::Error::custom(
+                    "poll media photo array is outside the accepted bounds",
+                ));
+            }
+        }
+        let mut map = serializer.serialize_map(Some(1 + self.extra.len()))?;
+        match &self.member {
+            PollMediaMember::Animation(value) => map.serialize_entry("animation", value)?,
+            PollMediaMember::Audio(value) => map.serialize_entry("audio", value)?,
+            PollMediaMember::Document(value) => map.serialize_entry("document", value)?,
+            PollMediaMember::Link(value) => map.serialize_entry("link", value)?,
+            PollMediaMember::LivePhoto(value) => map.serialize_entry("live_photo", value)?,
+            PollMediaMember::Location(value) => map.serialize_entry("location", value)?,
+            PollMediaMember::Photo(value) => map.serialize_entry("photo", value)?,
+            PollMediaMember::Sticker(value) => map.serialize_entry("sticker", value)?,
+            PollMediaMember::Venue(value) => map.serialize_entry("venue", value)?,
+            PollMediaMember::Video(value) => map.serialize_entry("video", value)?,
+            PollMediaMember::Unknown { tag, value } => map.serialize_entry(tag, value)?,
+        }
+        for (key, value) in &self.extra {
+            map.serialize_entry(key, value)?;
+        }
+        map.end()
+    }
+}
+
+fn set_media_member<E>(member: &mut Option<PollMediaMember>, next: PollMediaMember) -> Result<(), E>
+where
+    E: serde::de::Error,
+{
+    if member.is_some() {
+        return Err(E::custom(
+            "poll media must contain exactly one member, but several were supplied",
+        ));
+    }
+    *member = Some(next);
+    Ok(())
+}
+
+struct PollMediaVisitor;
+
+impl<'de> Visitor<'de> for PollMediaVisitor {
+    type Value = PollMedia;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("a poll media object with exactly one media member")
+    }
+
+    fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+    where
+        A: MapAccess<'de>,
+    {
+        let mut member = None;
+        let mut unknown = Vec::new();
+        let mut extra = Map::new();
+
+        while let Some(key) = map.next_key::<String>()? {
+            match key.as_str() {
+                "animation" => {
+                    set_media_member(&mut member, PollMediaMember::Animation(map.next_value()?))?;
+                }
+                "audio" => {
+                    set_media_member(&mut member, PollMediaMember::Audio(map.next_value()?))?;
+                }
+                "document" => {
+                    set_media_member(&mut member, PollMediaMember::Document(map.next_value()?))?;
+                }
+                "link" => {
+                    set_media_member(&mut member, PollMediaMember::Link(map.next_value()?))?;
+                }
+                "live_photo" | "livePhoto" => {
+                    set_media_member(&mut member, PollMediaMember::LivePhoto(map.next_value()?))?;
+                }
+                "location" => {
+                    set_media_member(&mut member, PollMediaMember::Location(map.next_value()?))?;
+                }
+                "photo" => {
+                    let BoundedVec(photos) = map.next_value::<BoundedVec<PhotoSize>>()?;
+                    if photos.is_empty() {
+                        return Err(serde::de::Error::custom(
+                            "poll media photo array must not be empty",
+                        ));
+                    }
+                    set_media_member(&mut member, PollMediaMember::Photo(photos))?;
+                }
+                "sticker" => {
+                    set_media_member(&mut member, PollMediaMember::Sticker(map.next_value()?))?;
+                }
+                "venue" => {
+                    set_media_member(&mut member, PollMediaMember::Venue(map.next_value()?))?;
+                }
+                "video" => {
+                    set_media_member(&mut member, PollMediaMember::Video(map.next_value()?))?;
+                }
+                _ => {
+                    let value = map.next_value::<Value>()?;
+                    if unknown.iter().any(|(seen, _)| seen == &key) || extra.contains_key(&key) {
+                        return Err(serde::de::Error::custom(format!(
+                            "poll media field `{key}` was supplied twice"
+                        )));
+                    }
+                    unknown.push((key, value));
+                }
+            }
+        }
+
+        let member = if let Some(member) = member {
+            member
+        } else {
+            unknown.sort_by(|left, right| left.0.cmp(&right.0));
+            if unknown.is_empty() {
+                return Err(serde::de::Error::custom(
+                    "poll media must contain exactly one member",
+                ));
+            }
+            let (tag, value) = unknown.remove(0);
+            PollMediaMember::Unknown { tag, value }
+        };
+        extra.extend(unknown);
+        Ok(PollMedia { member, extra })
+    }
+}
+
+impl<'de> Deserialize<'de> for PollMedia {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        deserializer.deserialize_map(PollMediaVisitor)
     }
 }
 
@@ -873,4 +1427,6 @@ pub enum PollMediaKind {
     Venue,
     /// The `video` member.
     Video,
+    /// A member this crate does not know yet.
+    Unknown,
 }
