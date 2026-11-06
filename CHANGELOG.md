@@ -8,6 +8,24 @@ means for this API is spelled out in the README under
 
 ## [Unreleased]
 
+### Added
+
+- **`MAX_RESPONSE_BYTES`: a response body is bounded before it is parsed**
+  (#32). The bundled `ReqwestTransport` now reads at most 16 MiB and reports a
+  larger answer as the new `Error::ResponseTooLarge { method, limit }` instead
+  of decoding it. The bound has to sit in front of the parser — once a body is a
+  `serde_json::Value` its size can no longer be checked, the memory is already
+  spent — so it is enforced twice: a declared `Content-Length` above the limit
+  is refused before a byte is read, and the bytes that actually arrive are
+  counted while they stream in, so a chunked answer (or one whose header
+  understates it) stops at the limit. The limit is inclusive and has no off
+  switch; `ReqwestTransport::with_max_response_bytes` installs a different one
+  and `max_response_bytes()` reports it. `Error::is_ambiguous()` answers `true`
+  for the new variant and `is_retryable()` answers `false`: the Bot API did
+  answer, so a send was most likely applied, while retrying would fetch the same
+  oversized body again. `Error` is `#[non_exhaustive]`, so existing matches keep
+  compiling.
+
 ### Changed
 
 - **`ChatMember` keeps the data its status carries** (#25). The type modelled
@@ -62,74 +80,14 @@ means for this API is spelled out in the README under
 
 ### Fixed
 
-- **An HTTP 5xx cannot be downgraded by a conflicting body error code** (#40).
-  `Error::from_api_body` preferred the JSON `error_code` over the HTTP status, so
-  a `502` carrying `error_code: 429` became a retryable `RateLimited` error for
-  every method, and a `502` carrying `400` became terminal instead of ambiguous
-  for a send. When the HTTP status is 5xx it now supplies the effective code;
-  the body still supplies the description, while a body-level rate-limit hint
-  is ignored. A send therefore stays `Ambiguous` and is not retried, while an
-  idempotent `get*` remains retryable. Body-only transports keep classifying
-  from `error_code` as before.
-- **Multipart serialization failures are no longer treated as JSON-only requests**
-  (#37). `multipart_form()` now returns `Result<Option<MultipartForm>>` on every
-  media request. `Ok(None)` still means no upload; a configured upload whose
-  body cannot be serialized is `Error::Payload` with the serde failure as its
-  source, and the client never falls back to posting JSON without the file.
-- **Formatting entities are range-checked against their UTF-16 text** (#38).
-  `sendMessage`, media captions and albums, `editMessageText`,
-  `editMessageCaption`, `editMessageMedia` and `copyMessage` now reject negative
-  offsets, non-positive lengths, overflowing ranges and ranges past the text or
-  caption before a request reaches the transport.
-- **`copyMessage` reply targets must be positive when present** (#39). A zero or
-  negative `reply_to_message_id` is rejected locally instead of costing a round
-  trip to Telegram. Both validation fixes include boundary and property tests.
-- **Inline query results are validated structurally** (#21). `answerInlineQuery`
-  only counted `results`, so a `null` entry, a result without `type` or `id`, an
-  id longer than the documented 64 bytes and two results sharing one id all
-  passed local validation and were rejected by the Bot API — or worse, accepted
-  as an ambiguous answer whose client-side selection was undefined. Every result
-  must now be a JSON object with a non-empty string `type` and a unique string
-  `id` of 1 to 64 **bytes** (`MAX_INLINE_RESULT_ID_BYTES`, measured in UTF-8
-  bytes, so 16 four-byte emoji fit and 17 do not). The whole array is checked
-  before the request is posted, the error names the offending index
-  (`results[2].id must be 1 to 64 bytes, got 65`), and
-  `InlineQueryResult::validate` exposes the same check for a single result.
-  Nothing else got stricter: unknown `type` values are still carried verbatim,
-  and every member other than `type` and `id` is forwarded untouched.
-- **File helpers have boundary and property coverage** (#55). Tests cover the
-  256-byte identifier ceiling, trim and control-character rejection, missing and
-  mistyped required fields, unsafe path families, unknown-field round trips, URL
-  encoding, and size decisions below, at, above and beyond
-  `MAX_DOWNLOAD_BYTES`, including `None` and `u64::MAX`.
-- **A body-level error is classified inside the retry loop** (#29). `post` used
-  to hand back any `Ok` envelope and let `take_result` build the error
-  afterwards, so a transport that delivers the decoded `{"ok": false, ...}` body
-  instead of raising it bypassed every rule the crate has for retries: a 429 body
-  was never retried, a 5xx body on a send stayed a *retryable* `Api` error
-  instead of `Ambiguous`, and an unreadable `result` was reported as
-  `Payload`/`Unexpected` — "the request failed" — even though the bot had already
-  processed it and a caller's retry would duplicate the message. The envelope is
-  now checked on every attempt inside the loop and classified with
-  `classify_for(method)`, so both shapes of failure behave identically: 429 and
-  pre-write failures are retried (honouring `retry_after` and `max_delay`), a 5xx
-  on a state-changing method is `Ambiguous` and costs exactly one call, and a
-  `get*` 5xx is retried. A `result` that is missing or does not decode is
-  `Ambiguous` for a state-changing method, with the precise `Unexpected`/`Payload`
-  error — and its `serde_json` cause — kept as the source; a `get*` method keeps
-  the decoding error itself, since nothing changed and repeating the call is
-  free. `Transport` implementations may therefore stay dumb: returning the body
-  unjudged is now as safe as calling `Error::from_api_body` themselves.
-- **A `getChatMember` result missing `status` or `user` is a decode error** (#26).
-  Both members are mandatory in the Bot API, but `ChatMember` marked them
-  `serde(default)`, so a truncated or malformed payload decoded into a member
-  with an empty `Unknown` status and the default user — a fabricated identity
-  instead of a failure. The two members are now required: their absence (or a
-  `null`) surfaces as `Error::Payload { message, source }` naming the method and
-  keeping the `serde_json` failure as the source. Nothing else got stricter —
-  an unknown `status` value is still carried verbatim as
-  `ChatMemberStatus::Unknown`, unknown fields are still ignored, and the
-  optional members (`is_anonymous`) still default.
+- **An answer is no longer copied before it is decoded** (#32). The client
+  cloned `result` out of the envelope before deserializing, duplicating the
+  whole subtree: a large or hostile answer cost its own size twice, and the copy
+  happened before any size check could apply. `result` is now removed from the
+  owned envelope and moved into the decoder, so the tree exists once. The
+  deprecated raw-envelope methods validate the result without cloning it. The
+  transport-side limit above is the other half: nothing downstream can bound a
+  value tree, so the bound has to be a byte count before parsing.
 - **`with_source` keeps the cause for `NotSent` and `Transport`** (#41). The
   method only ever filled the `Ambiguous` slot, so a transport that reported
   `Error::not_sent("dns failed").with_source(io_error)` lost the DNS/TLS cause

@@ -107,25 +107,52 @@ fn lost_answer(method: &str, error: Error) -> Error {
     }
 }
 
-/// Pulls `result` out of an already-checked envelope and deserializes it.
-fn decode_result<D: DeserializeOwned>(method: &str, response: &serde_json::Value) -> Result<D> {
+/// Borrows `result` out of an already-checked envelope.
+fn envelope_result<'a>(
+    method: &str,
+    response: &'a serde_json::Value,
+) -> Result<&'a serde_json::Value> {
+    response.get("result").ok_or_else(|| Error::Unexpected {
+        method: method.to_string(),
+        detail: "response has no `result` field".to_string(),
+    })
+}
+
+/// Takes `result` out of a successful envelope and deserializes it.
+///
+/// The envelope is consumed rather than copied: `result` is removed from the
+/// object and moved into the decoder, so the response tree exists exactly once.
+/// A `.cloned()` here duplicated the whole subtree before deserializing, which
+/// doubled peak memory for a large answer before any transport-side size bound
+/// could apply (issue #32).
+fn take_result<D: DeserializeOwned>(method: &str, mut response: serde_json::Value) -> Result<D> {
+    // Check on the borrowed tree first, so a failed answer is reported as
+    // Telegram described it and no member is moved out of a rejected body.
+    envelope_result(method, &response).map_err(|error| lost_answer(method, error))?;
     let result = response
-        .get("result")
-        .cloned()
+        .as_object_mut()
+        .and_then(|envelope| envelope.remove("result"))
         .ok_or_else(|| Error::Unexpected {
             method: method.to_string(),
             detail: "response has no `result` field".to_string(),
         })?;
-    serde_json::from_value(result).map_err(|error| Error::Payload {
-        message: format!("{method}: could not decode result: {error}"),
-        source: Some(error),
-    })
+    serde_json::from_value(result)
+        .map_err(|error| Error::Payload {
+            message: format!("{method}: could not decode result: {error}"),
+            source: Some(error),
+        })
+        .map_err(|error| lost_answer(method, error))
 }
 
-/// Pulls `result` out of a successful envelope and deserializes it, keeping the
-/// fact that the request was already processed.
-fn take_result<D: DeserializeOwned>(method: &str, response: &serde_json::Value) -> Result<D> {
-    decode_result(method, response).map_err(|error| lost_answer(method, error))
+/// Validates the `result` of a raw envelope without taking or cloning it.
+///
+/// The deprecated raw-returning methods hand the whole envelope back to the
+/// caller. They still need the same failure and presence checks, but the result
+/// must remain inside that envelope.
+fn check_raw_result(method: &str, response: &serde_json::Value) -> Result<()> {
+    envelope_result(method, response)
+        .map(|_| ())
+        .map_err(|error| lost_answer(method, error))
 }
 
 /// Generates a thin client method: validate, post, decode.
@@ -148,7 +175,7 @@ macro_rules! api_method {
         pub async fn $name(&self, request: &$request) -> Result<$response> {
             request.validate()?;
             let response = self.call($method, request).await?;
-            take_result($method, &response)
+            take_result($method, response)
         }
     };
 }
@@ -176,7 +203,7 @@ macro_rules! media_method {
             request.validate()?;
             let form = request.multipart_form()?;
             let response = self.call_maybe_upload($method, request, form).await?;
-            take_result($method, &response)
+            take_result($method, response)
         }
     };
 }
@@ -590,7 +617,7 @@ impl<T: Transport> TelegramClient<T> {
         let response = self.call("sendMessage", &request).await?;
         // The envelope goes back as it arrived, but it is still checked: a
         // failed body or one without `result` must not read as a success.
-        take_result::<serde_json::Value>("sendMessage", &response)?;
+        check_raw_result("sendMessage", &response)?;
         Ok(response)
     }
 
@@ -1106,7 +1133,7 @@ impl<T: Transport> TelegramClient<T> {
     /// ```
     pub async fn get_webhook_info(&self) -> Result<WebhookInfo> {
         let response = self.call("getWebhookInfo", &json!({})).await?;
-        take_result("getWebhookInfo", &response)
+        take_result("getWebhookInfo", response)
     }
 
     // ---- polling --------------------------------------------------------
@@ -1182,7 +1209,7 @@ impl<T: Transport> TelegramClient<T> {
     #[deprecated(since = "0.1.1", note = "use `me` for a typed User")]
     pub async fn get_me(&self) -> Result<serde_json::Value> {
         let response = self.call("getMe", &json!({})).await?;
-        take_result::<serde_json::Value>("getMe", &response)?;
+        check_raw_result("getMe", &response)?;
         Ok(response)
     }
 
@@ -1203,7 +1230,7 @@ impl<T: Transport> TelegramClient<T> {
     /// ```
     pub async fn me(&self) -> Result<User> {
         let response = self.call("getMe", &json!({})).await?;
-        take_result("getMe", &response)
+        take_result("getMe", response)
     }
 }
 
@@ -1213,5 +1240,85 @@ impl<T: Transport> std::fmt::Debug for TelegramClient<T> {
         f.debug_struct("TelegramClient")
             .field("base_url", &self.base_url)
             .finish_non_exhaustive()
+    }
+}
+
+/// Unit tests for the envelope gate. `take_result` is private, and the
+/// properties it carries are exactly the ones the typed methods depend on:
+/// the envelope is consumed rather than copied, a failed answer is an error,
+/// and a missing `result` is named instead of read as "nothing".
+#[cfg(test)]
+mod tests {
+    use super::{check_raw_result, take_result};
+    use crate::error::Error;
+    use crate::update::{Message, User};
+    use serde_json::json;
+
+    #[test]
+    fn the_envelope_is_consumed_and_its_result_decoded() {
+        let envelope = json!({ "ok": true, "result": { "message_id": 7 } });
+        // The envelope is handed over, not borrowed: this line only compiles
+        // while `take_result` still takes a `Value` by value, which is what
+        // keeps the result from being cloned (issue #32).
+        let message: Message =
+            take_result("sendMessage", envelope).expect("a well-formed envelope decodes");
+        assert_eq!(message.message_id, 7);
+    }
+
+    #[test]
+    fn a_large_result_is_decoded_from_the_tree_it_arrived_in() {
+        // One megabyte of result: decoded straight out of the envelope, so the
+        // payload is never held twice. A reintroduced `.cloned()` would not
+        // fail here, but the doc contract on `take_result` and this test's
+        // by-value call are what keep it out.
+        let payload = "x".repeat(1024 * 1024);
+        let envelope = json!({ "ok": true, "result": payload });
+        let value: serde_json::Value = take_result("getMe", envelope).expect("big result");
+        assert_eq!(value.as_str().map(str::len), Some(1024 * 1024));
+    }
+
+    #[test]
+    fn a_failed_answer_is_rejected_before_the_result() {
+        let envelope = json!({
+            "ok": false,
+            "error_code": 403,
+            "description": "Forbidden: bot was blocked by the user",
+        });
+        let error = take_result::<User>("getMe", envelope).expect_err("ok: false");
+        assert!(matches!(error, Error::Unexpected { .. }), "{error:?}");
+    }
+
+    #[test]
+    fn an_envelope_without_result_is_reported_not_ignored() {
+        let error =
+            take_result::<Message>("getChat", json!({ "ok": true })).expect_err("no result");
+        match &error {
+            Error::Unexpected { method, detail } => {
+                assert_eq!(method, "getChat");
+                assert!(detail.contains("result"), "{detail}");
+            }
+            other => panic!("expected Error::Unexpected, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_result_of_the_wrong_shape_names_the_method() {
+        let error = take_result::<User>("getMe", json!({ "ok": true, "result": "nope" }))
+            .expect_err("a string is not a user");
+        match &error {
+            Error::Payload { message, source } => {
+                assert!(message.contains("getMe"), "{message}");
+                assert!(message.contains("could not decode result"), "{message}");
+                assert!(source.is_some(), "the serde failure stays reachable");
+            }
+            other => panic!("expected Error::Payload, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_lost_answer_to_a_send_is_ambiguous() {
+        let error = check_raw_result("sendMessage", &json!({ "ok": true })).expect_err("no result");
+        assert!(matches!(error, Error::Ambiguous { .. }), "{error:?}");
+        assert!(!error.is_retryable());
     }
 }
