@@ -954,6 +954,47 @@ fn unknown_fields_are_ignored_everywhere() {
 }
 
 #[test]
+fn file_required_ids_and_paths_are_validated_while_decoding() {
+    use telegram_api_client::File;
+
+    assert!(serde_json::from_str::<File>(r#"{"file_unique_id":"u"}"#).is_err());
+    assert!(serde_json::from_str::<File>(r#"{"file_id":"A"}"#).is_err());
+    assert!(serde_json::from_str::<File>(r#"{"file_id":"","file_unique_id":"u"}"#).is_err());
+    assert!(serde_json::from_str::<File>(r#"{"file_id":"A","file_unique_id":""}"#).is_err());
+    assert!(serde_json::from_str::<File>(r#"{"file_id":1,"file_unique_id":"u"}"#).is_err());
+    assert!(serde_json::from_str::<File>(r#"{"file_id":"A","file_unique_id":1}"#).is_err());
+
+    for path in [
+        "",
+        "   ",
+        "/photos/a.jpg",
+        "photos/../a.jpg",
+        "photos/./a.jpg",
+        "photos/a.jpg?x=1",
+        "photos/a.jpg#fragment",
+        "photos//a.jpg",
+        "photos/a.jpg\\..\\b",
+        "photos/a\u{0000}.jpg",
+    ] {
+        let payload = serde_json::json!({
+            "file_id": "A",
+            "file_unique_id": "u",
+            "file_path": path,
+        });
+        assert!(
+            serde_json::from_value::<File>(payload).is_err(),
+            "accepted unsafe path {path:?}"
+        );
+    }
+
+    let file: File = serde_json::from_str(
+        r#"{"file_id":"A","file_unique_id":"u","file_path":"photos/Grüße 2026.jpg"}"#,
+    )
+    .unwrap();
+    assert_eq!(file.download_path(), Some("photos/Grüße 2026.jpg"));
+}
+
+#[test]
 fn unknown_enum_variants_are_carried() {
     let update: Update = serde_json::from_str(
         r#"{"update_id":1,"message":{"message_id":2,"chat":{"id":3,"type":"forum"}}}"#,
@@ -1000,7 +1041,10 @@ fn missing_optional_fields_default() {
     assert!(!info.is_registered());
     assert_eq!(info.pending_update_count, 0);
 
-    let file: telegram_api_client::File = serde_json::from_str("{}").unwrap();
+    let file: telegram_api_client::File =
+        serde_json::from_str(r#"{"file_id":"A","file_unique_id":"u"}"#).unwrap();
+    assert_eq!(file.file_size, None);
+    assert_eq!(file.file_path, None);
     assert!(!file.is_downloadable());
 }
 

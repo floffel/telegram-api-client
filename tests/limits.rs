@@ -192,26 +192,37 @@ const _: () = {
 
 #[test]
 fn a_download_fits_the_ceiling_inclusively() {
-    let at_limit = File {
-        file_size: Some(MAX_DOWNLOAD_BYTES as u64),
-        ..File::default()
-    };
+    let at_limit: File = serde_json::from_value(serde_json::json!({
+        "file_id": "A",
+        "file_unique_id": "u",
+        "file_size": MAX_DOWNLOAD_BYTES,
+    }))
+    .unwrap();
     assert_eq!(at_limit.fits_download_limit(), Some(true));
 
-    let over = File {
-        file_size: Some(MAX_DOWNLOAD_BYTES as u64 + 1),
-        ..File::default()
-    };
+    let over: File = serde_json::from_value(serde_json::json!({
+        "file_id": "A",
+        "file_unique_id": "u",
+        "file_size": MAX_DOWNLOAD_BYTES + 1,
+    }))
+    .unwrap();
     assert_eq!(over.fits_download_limit(), Some(false));
 
     // Empty files and unknown sizes: Telegram reports `file_size: 0` for an
     // empty file, and omits the field when it does not know.
-    let empty = File {
-        file_size: Some(0),
-        ..File::default()
-    };
+    let empty: File = serde_json::from_value(serde_json::json!({
+        "file_id": "A",
+        "file_unique_id": "u",
+        "file_size": 0,
+    }))
+    .unwrap();
     assert_eq!(empty.fits_download_limit(), Some(true));
-    assert_eq!(File::default().fits_download_limit(), None);
+    let unknown: File = serde_json::from_value(serde_json::json!({
+        "file_id": "A",
+        "file_unique_id": "u",
+    }))
+    .unwrap();
+    assert_eq!(unknown.fits_download_limit(), None);
 }
 
 // ---- properties -----------------------------------------------------------

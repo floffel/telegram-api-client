@@ -64,7 +64,7 @@ pub use events::{
     PaidMediaPurchased, Poll, PollAnswer, PollOption, PreCheckoutQuery, ReactionCount,
     ReactionType, ShippingAddress, ShippingQuery, BOT_API_VERSION,
 };
-pub use file::{File, GetFile, MAX_DOWNLOAD_BYTES};
+pub use file::{File, GetFile, MAX_DOWNLOAD_BYTES, MAX_FILE_ID_BYTES};
 pub use media::{
     Animation, Audio, Document, Link, LivePhoto, MaskPosition, PhotoSize, PollMedia, PollMediaKind,
     Sticker, Venue, Video, VideoQuality,

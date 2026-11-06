@@ -269,6 +269,10 @@ assert!(request.multipart_form().is_some());
   stop at 20 MB (`MAX_DOWNLOAD_BYTES`, pre-check with
   `File::fits_download_limit`). A URL carries no size, so the crate documents
   those three instead of pretending to enforce them.
+* A `File` must carry non-empty `file_id` and `file_unique_id` values, each at
+  most `MAX_FILE_ID_BYTES`; unknown response members stay available through
+  `File::extra`. Download paths must be relative and non-traversing, and
+  `file_url` percent-encodes each path segment.
 * The MIME type is guessed from the extension (`guess_mime`) and may be
   overridden; a syntactically invalid type (`is_valid_mime`) is refused.
 * Each method accepts only the families Telegram accepts: `image/` for photos,

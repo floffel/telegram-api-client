@@ -10,6 +10,21 @@ means for this API is spelled out in the README under
 
 ### Changed
 
+- **`File` now requires valid identifiers and preserves future fields** (#51,
+  #54, #53). `file_id` and `file_unique_id` were marked `serde(default)`, so an
+  empty or truncated `getFile` result decoded into a fabricated empty file.
+  Both are now required and non-empty, reject surrounding whitespace and control
+  characters, and are capped at 256 bytes (`MAX_FILE_ID_BYTES`). The same
+  identifier checks apply to `GetFile::validate`. `File` also gained a flattened
+  `extra` map, so unknown Bot API members survive a decode/serialize round trip.
+  `File` no longer implements `Default`; that state could not exist on the wire.
+  **Breaking** for struct-literal callers that relied on the empty default.
+- **File download paths are validated and encoded segment by segment** (#52).
+  Whitespace-only, absolute, parent-traversal, empty-segment, query, fragment,
+  backslash and control-bearing `file_path` values are rejected while decoding
+  and never report as downloadable. `file_url` now builds the URL through
+  `url::Url`, percent-encoding spaces, Unicode and other segment characters
+  rather than concatenating an unchecked string.
 - **Numeric media members are unsigned, and a negative one is a parse error**
   (#60). `file_size`, `duration`, `width`, `height` and `start_timestamp` were
   `i64`, so `{"file_size": -1}` deserialized into a media object that cannot
@@ -39,6 +54,11 @@ means for this API is spelled out in the README under
   `InlineQueryResult::validate` exposes the same check for a single result.
   Nothing else got stricter: unknown `type` values are still carried verbatim,
   and every member other than `type` and `id` is forwarded untouched.
+- **File helpers have boundary and property coverage** (#55). Tests cover the
+  256-byte identifier ceiling, trim and control-character rejection, missing and
+  mistyped required fields, unsafe path families, unknown-field round trips, URL
+  encoding, and size decisions below, at, above and beyond
+  `MAX_DOWNLOAD_BYTES`, including `None` and `u64::MAX`.
 - **A body-level error is classified inside the retry loop** (#29). `post` used
   to hand back any `Ok` envelope and let `take_result` build the error
   afterwards, so a transport that delivers the decoded `{"ok": false, ...}` body

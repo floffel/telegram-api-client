@@ -561,14 +561,21 @@ fn client_accessors_and_file_urls() {
         TelegramClient::new("1:A", MockTransport::new()).with_base_url("https://proxy.test/");
     assert_eq!(client.base_url(), "https://proxy.test/");
 
-    let file = File {
-        file_path: Some("/photos/a b.jpg".into()),
-        ..File::default()
-    };
+    let file: File = serde_json::from_value(json!({
+        "file_id": "A",
+        "file_unique_id": "u",
+        "file_path": "photos/a b.jpg",
+    }))
+    .unwrap();
     let url = client.file_url(&file).expect("download url");
-    assert!(url.starts_with("https://proxy.test/file/bot1:A/"), "{url}");
+    assert_eq!(url, "https://proxy.test/file/bot1:A/photos/a%20b.jpg");
 
-    let error = client.file_url(&File::default()).expect_err("no path");
+    let no_path: File = serde_json::from_value(json!({
+        "file_id": "A",
+        "file_unique_id": "u",
+    }))
+    .unwrap();
+    let error = client.file_url(&no_path).expect_err("no path");
     assert!(matches!(error, Error::Unexpected { .. }));
 }
 
