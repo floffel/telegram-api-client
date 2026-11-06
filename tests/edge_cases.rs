@@ -575,6 +575,145 @@ fn inline_result_count_boundaries() {
 }
 
 #[test]
+fn inline_results_must_be_objects_with_a_type_and_an_id() {
+    // `null`, a string and an array are not results; the two mandatory members
+    // may not be missing, blank or of the wrong JSON type.
+    let broken = [
+        json!(null),
+        json!("article"),
+        json!([{ "type": "article", "id": "1" }]),
+        json!({ "id": "1" }),
+        json!({ "type": "", "id": "1" }),
+        json!({ "type": " \t", "id": "1" }),
+        json!({ "type": 7, "id": "1" }),
+        json!({ "type": "article" }),
+        json!({ "type": "article", "id": 7 }),
+        json!({ "type": "article", "id": null }),
+    ];
+    for value in broken {
+        let result = InlineQueryResult::new(value);
+        assert!(
+            result.validate().is_err(),
+            "a lone result must be refused: {}",
+            result.value
+        );
+        let answer = AnswerInlineQuery::new("q", vec![result]);
+        assert_invalid(answer.validate().unwrap_err(), "results");
+    }
+
+    // An unknown `type` and unknown members are fine: the crate forwards shapes
+    // it does not model instead of narrowing the Bot API.
+    let future = InlineQueryResult::new(json!({
+        "type": "hologram",
+        "id": "1",
+        "sticker_url": "https://example.com/x.webm",
+        "something_new": { "nested": [1, 2, 3] },
+    }));
+    assert!(future.validate().is_ok());
+    assert!(AnswerInlineQuery::new("q", vec![future]).validate().is_ok());
+}
+
+#[test]
+fn inline_result_id_boundary_is_measured_in_bytes() {
+    let with_id = |id: String| InlineQueryResult::new(json!({"type": "article", "id": id}));
+
+    // 1 and 64 bytes are inside the limit, 0 and 65 are not.
+    assert!(with_id("x".to_string()).validate().is_ok());
+    assert!(with_id("x".repeat(64)).validate().is_ok());
+    assert!(with_id(String::new()).validate().is_err());
+    assert!(with_id("x".repeat(65)).validate().is_err());
+
+    // Bytes, not characters: 16 four-byte emoji are exactly 64 bytes and pass,
+    // 17 are 68 bytes and fail, and 21 characters alone are below the limit.
+    let at_limit = "🎯".repeat(16);
+    assert_eq!(at_limit.chars().count(), 16);
+    assert_eq!(at_limit.len(), 64);
+    assert!(with_id(at_limit).validate().is_ok());
+
+    let over = "🎯".repeat(17);
+    assert_eq!(over.chars().count(), 17);
+    assert!(with_id(over).validate().is_err());
+
+    // The answer reports the index and the measured size.
+    let answer = AnswerInlineQuery::new(
+        "q",
+        vec![
+            InlineQueryResult::article("a", "t", "m"),
+            with_id("x".repeat(65)),
+        ],
+    );
+    let error = answer.validate().unwrap_err();
+    let message = error.to_string();
+    assert_invalid(error, "results");
+    assert!(message.contains("results[1].id"), "{message}");
+    assert!(message.contains("65"), "{message}");
+}
+
+#[test]
+fn inline_result_ids_must_be_unique_across_the_answer() {
+    let result = |id: &str| InlineQueryResult::article(id, "t", "m");
+    assert!(AnswerInlineQuery::new("q", vec![result("1"), result("2")])
+        .validate()
+        .is_ok());
+
+    // The same id twice — even with different members — makes the answer
+    // ambiguous for the client, so it is refused. Case matters: ids are opaque.
+    let duplicate = AnswerInlineQuery::new("q", vec![result("1"), result("2"), result("1")]);
+    let error = duplicate.validate().unwrap_err();
+    let message = error.to_string();
+    assert_invalid(error, "results");
+    assert!(message.contains("results[2].id"), "{message}");
+    assert!(message.contains("\"1\""), "{message}");
+
+    assert!(AnswerInlineQuery::new("q", vec![result("a"), result("A")])
+        .validate()
+        .is_ok());
+
+    // Duplicates at the 50-result ceiling are still caught.
+    let mut full = (0..49).map(|i| result(&i.to_string())).collect::<Vec<_>>();
+    full.push(result("0"));
+    assert_eq!(full.len(), 50);
+    assert_invalid(
+        AnswerInlineQuery::new("q", full).validate().unwrap_err(),
+        "results",
+    );
+}
+
+#[test]
+fn inline_result_validation_keeps_every_other_member() {
+    let value = json!({
+        "type": "photo",
+        "id": "p1",
+        "photo_url": "https://example.com/a.jpg",
+        "thumbnail_url": "https://example.com/t.jpg",
+        "photo_width": 320,
+        "photo_height": 200,
+        "caption": "#tag <b>bold</b> ✓",
+        "future_member": { "nested": [1, 2, 3] },
+    });
+    let answer = AnswerInlineQuery::new("q", vec![InlineQueryResult::new(value.clone())]);
+    assert!(answer.validate().is_ok());
+    // Validation is a check, not a rewrite: the wire body is byte-identical.
+    let body = serde_json::to_value(&answer).unwrap();
+    assert_eq!(body["results"][0], value);
+}
+
+#[tokio::test]
+async fn a_malformed_inline_result_never_reaches_the_transport() {
+    let (client, transport) = client();
+    let answer = AnswerInlineQuery::new(
+        "q",
+        vec![InlineQueryResult::new(json!({"type": "article"}))],
+    );
+    let error = client.answer_inline_query(&answer).await.unwrap_err();
+    assert_invalid(error, "results");
+    assert!(
+        transport.last_call().is_none(),
+        "validation happens before the request is posted"
+    );
+}
+
+#[test]
 fn get_updates_limit_and_offset_boundaries() {
     assert!(GetUpdates::new().limit(1).validate().is_ok());
     assert!(GetUpdates::new().limit(100).validate().is_ok());

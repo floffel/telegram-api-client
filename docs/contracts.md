@@ -100,6 +100,29 @@ the status alone does not say whether a restricted user is in the chat.
 | Source URL | <https://core.telegram.org/bots/api#chatmemberrestricted> |
 | Fetched | 2026-11-02 |
 
+## `InlineQueryResult`
+
+Quote, "InlineQueryResult": *"This object represents one result of an inline
+query. Telegram clients currently support results of the following 20 types"* —
+and `answerInlineQuery` adds *"No more than 50 results per query are allowed."*
+The two members every one of the 20 shapes repeats are the ones this crate can
+check without modelling the other 19.
+
+| Field | Type | Description on the page | Enforced as |
+| --- | --- | --- | --- |
+| `type` | String | "Type of the result, must be article" (per shape) | non-empty string; an unknown type is carried, not rejected |
+| `id` | String | "Unique identifier for this result, 1-64 Bytes" | string, 1-64 UTF-8 bytes, unique within one answer |
+| all other members | — | shape-specific | carried verbatim |
+
+`id` is compared as bytes, so a 16-character string of four-byte emoji is exactly
+at the limit and a 17-character one is over. `results` itself is an array, which
+is why a `null`, a string or an array element is refused before the wire.
+
+| Item | Value |
+| --- | --- |
+| Source URL | <https://core.telegram.org/bots/api#inlinequeryresult> |
+| Fetched | 2026-11-02 |
+
 ## Known gaps (tracked, not hidden)
 
 - `Message` still models the subset the crate can act on (id, chat, sender,

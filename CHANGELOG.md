@@ -26,6 +26,19 @@ means for this API is spelled out in the README under
 
 ### Fixed
 
+- **Inline query results are validated structurally** (#21). `answerInlineQuery`
+  only counted `results`, so a `null` entry, a result without `type` or `id`, an
+  id longer than the documented 64 bytes and two results sharing one id all
+  passed local validation and were rejected by the Bot API — or worse, accepted
+  as an ambiguous answer whose client-side selection was undefined. Every result
+  must now be a JSON object with a non-empty string `type` and a unique string
+  `id` of 1 to 64 **bytes** (`MAX_INLINE_RESULT_ID_BYTES`, measured in UTF-8
+  bytes, so 16 four-byte emoji fit and 17 do not). The whole array is checked
+  before the request is posted, the error names the offending index
+  (`results[2].id must be 1 to 64 bytes, got 65`), and
+  `InlineQueryResult::validate` exposes the same check for a single result.
+  Nothing else got stricter: unknown `type` values are still carried verbatim,
+  and every member other than `type` and `id` is forwarded untouched.
 - **A body-level error is classified inside the retry loop** (#29). `post` used
   to hand back any `Ok` envelope and let `take_result` build the error
   afterwards, so a transport that delivers the decoded `{"ok": false, ...}` body
