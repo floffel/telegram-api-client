@@ -28,9 +28,160 @@ use crate::update::{Chat, User};
 /// ```
 pub const BOT_API_VERSION: &str = "10.3";
 
-/// Serde default for the `rights` booleans Telegram omits when they are on.
-fn default_true() -> bool {
-    true
+/// Deserializes a reaction count, refusing a negative value.
+fn deserialize_reaction_count<'de, D>(deserializer: D) -> Result<i64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let count = i64::deserialize(deserializer)?;
+    if count < 0 {
+        return Err(serde::de::Error::custom(format!(
+            "reaction total_count must not be negative, got {count}"
+        )));
+    }
+    Ok(count)
+}
+
+/// Deserializes a required latitude in the inclusive Bot API range.
+fn deserialize_latitude<'de, D>(deserializer: D) -> Result<f64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    deserialize_finite_range(deserializer, "latitude", -90.0, 90.0)
+}
+
+/// Deserializes a required longitude in the inclusive Bot API range.
+fn deserialize_longitude<'de, D>(deserializer: D) -> Result<f64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    deserialize_finite_range(deserializer, "longitude", -180.0, 180.0)
+}
+
+/// Deserializes a finite number inside an inclusive range.
+fn deserialize_finite_range<'de, D>(
+    deserializer: D,
+    field: &'static str,
+    min: f64,
+    max: f64,
+) -> Result<f64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = f64::deserialize(deserializer)?;
+    if !value.is_finite() || !(min..=max).contains(&value) {
+        return Err(serde::de::Error::custom(format!(
+            "location field `{field}` must be finite and within {min}..={max}, got {value}"
+        )));
+    }
+    Ok(value)
+}
+
+/// Deserializes optional horizontal accuracy in metres.
+fn deserialize_accuracy<'de, D>(deserializer: D) -> Result<Option<f64>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<f64>::deserialize(deserializer)?;
+    match value {
+        Some(value) if !value.is_finite() || !(0.0..=1500.0).contains(&value) => {
+            Err(serde::de::Error::custom(format!(
+                "location field `horizontal_accuracy` must be finite and within 0..=1500, got {value}"
+            )))
+        }
+        value => Ok(value),
+    }
+}
+
+/// Deserializes optional live-location duration in seconds.
+fn deserialize_live_period<'de, D>(deserializer: D) -> Result<Option<i64>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<i64>::deserialize(deserializer)?;
+    match value {
+        Some(value) if !(60..=86_400).contains(&value) => Err(serde::de::Error::custom(format!(
+            "location field `live_period` must be within 60..=86400, got {value}"
+        ))),
+        value => Ok(value),
+    }
+}
+
+/// Deserializes optional movement heading in degrees.
+fn deserialize_heading<'de, D>(deserializer: D) -> Result<Option<i64>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<i64>::deserialize(deserializer)?;
+    match value {
+        Some(value) if !(1..=360).contains(&value) => Err(serde::de::Error::custom(format!(
+            "location field `heading` must be within 1..=360, got {value}"
+        ))),
+        value => Ok(value),
+    }
+}
+
+/// Deserializes optional proximity alert radius in metres.
+fn deserialize_proximity_radius<'de, D>(deserializer: D) -> Result<Option<i64>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<i64>::deserialize(deserializer)?;
+    match value {
+        Some(value) if !(1..=100_000).contains(&value) => Err(serde::de::Error::custom(format!(
+            "location field `proximity_alert_radius` must be within 1..=100000, got {value}"
+        ))),
+        value => Ok(value),
+    }
+}
+
+/// Deserializes a positive payment total in the smallest currency unit.
+fn deserialize_payment_total<'de, D>(deserializer: D) -> Result<i64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let amount = i64::deserialize(deserializer)?;
+    if amount <= 0 {
+        return Err(serde::de::Error::custom(format!(
+            "payment total_amount must be greater than zero, got {amount}"
+        )));
+    }
+    Ok(amount)
+}
+
+/// Deserializes and validates an ISO 4217 currency code, plus Telegram's XTR.
+fn deserialize_currency<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let currency = String::deserialize(deserializer)?;
+    if !is_iso_4217_currency(&currency) {
+        return Err(serde::de::Error::custom(format!(
+            "payment currency must be an active ISO 4217 code or XTR, got `{currency}`"
+        )));
+    }
+    Ok(currency)
+}
+
+/// Whether `code` is an active ISO 4217 currency code or Telegram Stars.
+fn is_iso_4217_currency(code: &str) -> bool {
+    const ACTIVE: &[&str] = &[
+        "AED", "AFN", "ALL", "AMD", "AOA", "ARS", "AUD", "AWG", "AZN", "BAM", "BBD", "BDT", "BGN",
+        "BHD", "BIF", "BMD", "BND", "BOB", "BOV", "BRL", "BSD", "BTN", "BWP", "BYN", "BZD", "CAD",
+        "CDF", "CHE", "CHF", "CHW", "CLF", "CLP", "CNY", "COP", "COU", "CRC", "CUP", "CVE", "CZK",
+        "DJF", "DKK", "DOP", "DZD", "EGP", "ERN", "ETB", "EUR", "FJD", "FKP", "GBP", "GEL", "GHS",
+        "GIP", "GMD", "GNF", "GTQ", "GYD", "HKD", "HNL", "HTG", "HUF", "IDR", "ILS", "INR", "IQD",
+        "IRR", "ISK", "JMD", "JOD", "JPY", "KES", "KGS", "KHR", "KMF", "KPW", "KRW", "KWD", "KYD",
+        "KZT", "LAK", "LBP", "LKR", "LRD", "LSL", "LYD", "MAD", "MDL", "MGA", "MKD", "MMK", "MNT",
+        "MOP", "MRU", "MUR", "MVR", "MWK", "MXN", "MXV", "MYR", "MZN", "NAD", "NGN", "NIO", "NOK",
+        "NPR", "NZD", "OMR", "PAB", "PEN", "PGK", "PHP", "PKR", "PLN", "PYG", "QAR", "RON", "RSD",
+        "RUB", "RWF", "SAR", "SBD", "SCR", "SDG", "SEK", "SGD", "SHP", "SLE", "SOS", "SRD", "SSP",
+        "STN", "SVC", "SYP", "SZL", "THB", "TJS", "TMT", "TND", "TOP", "TRY", "TTD", "TWD", "TZS",
+        "UAH", "UGX", "USD", "USN", "UYI", "UYU", "UYW", "UZS", "VED", "VES", "VND", "VUV", "WST",
+        "XAD", "XAF", "XAG", "XAU", "XBA", "XBB", "XBC", "XBD", "XCD", "XCG", "XDR", "XOF", "XPD",
+        "XPF", "XPT", "XSU", "XTS", "XUA", "XXX", "YER", "ZAR", "ZMW", "ZWG",
+    ];
+    code == "XTR" || ACTIVE.contains(&code)
 }
 
 /// One emoji, custom emoji or paid reaction on a message.
@@ -107,7 +258,7 @@ pub struct ReactionCount {
     #[serde(rename = "type", alias = "reactionType")]
     pub r#type: ReactionType,
     /// How many users set this reaction.
-    #[serde(default, alias = "totalCount")]
+    #[serde(alias = "totalCount", deserialize_with = "deserialize_reaction_count")]
     pub total_count: i64,
 }
 
@@ -144,8 +295,10 @@ pub struct MessageReactionUpdated {
     /// Reactions that were set before the change.
     #[serde(default, alias = "oldReaction")]
     pub old_reaction: Vec<ReactionType>,
-    /// Reactions that are set after the change; empty means removed.
-    #[serde(default, alias = "newReaction")]
+    /// Reactions that are set after the change; an explicit empty array means
+    /// all reactions were removed. The member is required, so a truncated
+    /// update cannot masquerade as a removal.
+    #[serde(alias = "newReaction")]
     pub new_reaction: Vec<ReactionType>,
 }
 
@@ -193,7 +346,10 @@ pub struct MessageReactionCountUpdated {
 }
 
 impl MessageReactionCountUpdated {
-    /// Sum of all reaction counts.
+    /// Sum of all reaction counts, saturating at [`i64::MAX`].
+    ///
+    /// Use [`checked_total`](Self::checked_total) when an overflow must be
+    /// distinguished from a genuine maximum total.
     ///
     /// ```
     /// use telegram_api_client::MessageReactionCountUpdated;
@@ -203,90 +359,91 @@ impl MessageReactionCountUpdated {
     /// ```
     #[must_use]
     pub fn total(&self) -> i64 {
-        self.reactions.iter().map(|count| count.total_count).sum()
+        self.reactions
+            .iter()
+            .fold(0, |total, count| total.saturating_add(count.total_count))
+    }
+
+    /// Sum of all reaction counts, or `None` if the sum would overflow.
+    ///
+    /// ```
+    /// use telegram_api_client::{MessageReactionCountUpdated, ReactionCount};
+    ///
+    /// let mut update = MessageReactionCountUpdated::default();
+    /// update.reactions = vec![
+    ///     ReactionCount { total_count: i64::MAX, ..ReactionCount::default() },
+    ///     ReactionCount { total_count: 1, ..ReactionCount::default() },
+    /// ];
+    /// assert_eq!(update.total(), i64::MAX);
+    /// assert_eq!(update.checked_total(), None);
+    /// ```
+    #[must_use]
+    pub fn checked_total(&self) -> Option<i64> {
+        self.reactions
+            .iter()
+            .try_fold(0_i64, |total, count| total.checked_add(count.total_count))
     }
 }
 
 /// What a business bot connected to a business account may do.
 ///
-/// Every flag is optional on the wire and defaults to `true`, which is how
-/// Telegram encodes "this right was granted".
+/// Every flag is optional on the wire. An omitted flag is treated as denied, so
+/// a truncated or partial rights object can never fail open.
 ///
 /// ```
 /// use telegram_api_client::BusinessBotRights;
 ///
 /// let rights: BusinessBotRights = serde_json::from_str(r#"{"can_reply":false}"#).unwrap();
 /// assert!(!rights.can_reply);
-/// assert!(rights.can_read_messages);
+/// assert!(!rights.can_read_messages);
 /// ```
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
-// The wire object is a flat set of optional flags, each defaulting to `true`;
-// nesting them would misrepresent what Telegram sends.
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+// The wire object is a flat set of optional flags; nesting them would
+// misrepresent what Telegram sends.
 #[allow(clippy::struct_excessive_bools)]
 pub struct BusinessBotRights {
     /// Reply to messages.
-    #[serde(default = "default_true")]
+    #[serde(default)]
     pub can_reply: bool,
     /// Read incoming messages.
-    #[serde(default = "default_true")]
+    #[serde(default)]
     pub can_read_messages: bool,
     /// Delete messages the bot sent.
-    #[serde(default = "default_true")]
+    #[serde(default)]
     pub can_delete_sent_messages: bool,
     /// Delete any message in the chat.
-    #[serde(default = "default_true")]
+    #[serde(default)]
     pub can_delete_all_messages: bool,
     /// Edit the business account's name.
-    #[serde(default = "default_true")]
+    #[serde(default)]
     pub can_edit_name: bool,
     /// Edit the business account's bio.
-    #[serde(default = "default_true")]
+    #[serde(default)]
     pub can_edit_bio: bool,
     /// Change the business account's profile photo.
-    #[serde(default = "default_true")]
+    #[serde(default)]
     pub can_edit_profile_photo: bool,
     /// Change the business account's username.
-    #[serde(default = "default_true")]
+    #[serde(default)]
     pub can_edit_username: bool,
     /// Change the account's gift settings.
-    #[serde(default = "default_true")]
+    #[serde(default)]
     pub can_change_gift_settings: bool,
     /// See the account's gifts and Stars.
-    #[serde(default = "default_true")]
+    #[serde(default)]
     pub can_view_gifts_and_stars: bool,
     /// Convert gifts into Stars.
-    #[serde(default = "default_true")]
+    #[serde(default)]
     pub can_convert_gifts_to_stars: bool,
     /// Transfer and upgrade gifts.
-    #[serde(default = "default_true")]
+    #[serde(default)]
     pub can_transfer_and_upgrade_gifts: bool,
     /// Transfer Stars.
-    #[serde(default = "default_true")]
+    #[serde(default)]
     pub can_transfer_stars: bool,
     /// Manage the account's stories.
-    #[serde(default = "default_true")]
+    #[serde(default)]
     pub can_manage_stories: bool,
-}
-
-impl Default for BusinessBotRights {
-    fn default() -> Self {
-        Self {
-            can_reply: true,
-            can_read_messages: true,
-            can_delete_sent_messages: true,
-            can_delete_all_messages: true,
-            can_edit_name: true,
-            can_edit_bio: true,
-            can_edit_profile_photo: true,
-            can_edit_username: true,
-            can_change_gift_settings: true,
-            can_view_gifts_and_stars: true,
-            can_convert_gifts_to_stars: true,
-            can_transfer_and_upgrade_gifts: true,
-            can_transfer_stars: true,
-            can_manage_stories: true,
-        }
-    }
 }
 
 /// The bot was connected to, disconnected from or re-configured for a business
@@ -801,6 +958,7 @@ pub struct OrderInfo {
 /// assert_eq!(query.total_amount, 1450);
 /// ```
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(from = "PreCheckoutQueryWire")]
 pub struct PreCheckoutQuery {
     /// Query id, needed to answer it.
     #[serde(default)]
@@ -827,6 +985,39 @@ pub struct PreCheckoutQuery {
     /// Order details the user entered.
     #[serde(default, alias = "orderInfo", skip_serializing_if = "Option::is_none")]
     pub order_info: Option<OrderInfo>,
+}
+
+/// The strict wire shape for [`PreCheckoutQuery`]. The public type keeps
+/// `from` optional for source compatibility, but a decoded query always has it.
+#[derive(Deserialize)]
+struct PreCheckoutQueryWire {
+    #[serde(alias = "queryId")]
+    id: String,
+    from: User,
+    #[serde(deserialize_with = "deserialize_currency")]
+    currency: String,
+    #[serde(alias = "totalAmount", deserialize_with = "deserialize_payment_total")]
+    total_amount: i64,
+    #[serde(alias = "invoicePayload")]
+    invoice_payload: String,
+    #[serde(default, alias = "shippingOptionId")]
+    shipping_option_id: Option<String>,
+    #[serde(default, alias = "orderInfo")]
+    order_info: Option<OrderInfo>,
+}
+
+impl From<PreCheckoutQueryWire> for PreCheckoutQuery {
+    fn from(wire: PreCheckoutQueryWire) -> Self {
+        Self {
+            id: wire.id,
+            from: Some(wire.from),
+            currency: wire.currency,
+            total_amount: wire.total_amount,
+            invoice_payload: wire.invoice_payload,
+            shipping_option_id: wire.shipping_option_id,
+            order_info: wire.order_info,
+        }
+    }
 }
 
 /// A user bought paid media that the bot offered.
@@ -859,29 +1050,41 @@ pub struct PaidMediaPurchased {
 /// ```
 #[derive(Debug, Clone, Copy, Default, Deserialize, Serialize)]
 pub struct Location {
-    /// Latitude in degrees.
-    #[serde(default)]
+    /// Latitude in degrees, required and within `-90.0..=90.0`.
+    #[serde(deserialize_with = "deserialize_latitude")]
     pub latitude: f64,
-    /// Longitude in degrees.
-    #[serde(default)]
+    /// Longitude in degrees, required and within `-180.0..=180.0`.
+    #[serde(deserialize_with = "deserialize_longitude")]
     pub longitude: f64,
-    /// Accuracy radius in metres.
+    /// Accuracy radius in metres, within `0.0..=1500.0`.
     #[serde(
         default,
         alias = "horizontalAccuracy",
+        deserialize_with = "deserialize_accuracy",
         skip_serializing_if = "Option::is_none"
     )]
     pub horizontal_accuracy: Option<f64>,
-    /// Period in seconds the location is updated for.
-    #[serde(default, alias = "livePeriod", skip_serializing_if = "Option::is_none")]
+    /// Period in seconds the location is updated for, within `60..=86400`.
+    #[serde(
+        default,
+        alias = "livePeriod",
+        deserialize_with = "deserialize_live_period",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub live_period: Option<i64>,
-    /// Direction of movement in degrees.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Direction of movement in degrees, within `1..=360`.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_heading",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub heading: Option<i64>,
-    /// Maximum distance for proximity alerts in metres.
+    /// Maximum distance for proximity alerts in metres, within
+    /// `1..=100000`.
     #[serde(
         default,
         alias = "proximityAlertRadius",
+        deserialize_with = "deserialize_proximity_radius",
         skip_serializing_if = "Option::is_none"
     )]
     pub proximity_alert_radius: Option<i64>,
