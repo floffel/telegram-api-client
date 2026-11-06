@@ -411,7 +411,7 @@ fn chat_administration_builders_compose() {
         .until(1_800_000_000)
         .revoking_messages();
     assert_eq!(ban.until_date, Some(1_800_000_000));
-    assert!(ban.validate().is_ok());
+    assert!(ban.validate_at(1_799_999_970).is_ok());
     assert!(matches!(
         BanChatMember::new(-1001_i64, 0).validate(),
         Err(Error::InvalidRequest {

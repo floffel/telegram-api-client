@@ -298,11 +298,76 @@ fn message_ids_must_be_positive() {
     assert_invalid(
         BanChatMember::new(CHAT, 1)
             .until(-1)
-            .validate()
+            .validate_at(1_800_000_000)
             .unwrap_err(),
         "until_date",
     );
     assert_invalid(GetFile::new("   ").validate().unwrap_err(), "file_id");
+}
+
+#[test]
+fn ban_expiry_accepts_exactly_the_temporary_window() {
+    let now = 1_800_000_000;
+    let just_too_soon = BanChatMember::new(CHAT, 42).until(now + 29);
+    assert_invalid(just_too_soon.validate_at(now).unwrap_err(), "until_date");
+
+    let earliest = BanChatMember::new(CHAT, 42).until(now + 30);
+    assert!(earliest.validate_at(now).is_ok());
+
+    let latest = BanChatMember::new(CHAT, 42).until(now + 366 * 24 * 60 * 60);
+    assert!(latest.validate_at(now).is_ok());
+
+    let just_too_late = BanChatMember::new(CHAT, 42).until(now + 366 * 24 * 60 * 60 + 1);
+    assert_invalid(just_too_late.validate_at(now).unwrap_err(), "until_date");
+
+    // Both explicit permanent-ban spellings remain valid. The absent form is
+    // what `new` builds; the check also covers a present zero.
+    assert!(BanChatMember::new(CHAT, 42).validate_at(now).is_ok());
+    assert!(BanChatMember::new(CHAT, 42)
+        .until(0)
+        .validate_at(now)
+        .is_ok());
+
+    // A clock before the Unix epoch cannot establish the window, so the
+    // temporary form fails closed while the explicit permanent forms do not
+    // need a clock at all.
+    assert_invalid(earliest.validate_at(-1).unwrap_err(), "until_date");
+    assert!(BanChatMember::new(CHAT, 42)
+        .until(0)
+        .validate_at(-1)
+        .is_ok());
+
+    assert_invalid(earliest.validate_at(i64::MAX).unwrap_err(), "until_date");
+}
+
+#[test]
+fn ban_validation_uses_the_current_clock() {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("the test clock is after the Unix epoch")
+        .as_secs();
+    let now = i64::try_from(now).expect("the test clock fits in i64");
+
+    assert!(BanChatMember::new(CHAT, 42)
+        .until(now - 1)
+        .validate()
+        .is_err());
+    assert!(BanChatMember::new(CHAT, 42)
+        .until(now + 60 * 60)
+        .validate()
+        .is_ok());
+}
+
+#[tokio::test]
+async fn stale_ban_expiry_never_reaches_the_transport() {
+    let (client, transport) = client();
+    let error = client
+        .ban_chat_member(&BanChatMember::new(CHAT, 42).until(1))
+        .await
+        .unwrap_err();
+
+    assert_invalid(error, "until_date");
+    assert!(transport.last_call().is_none());
 }
 
 // ---- chat members --------------------------------------------------------

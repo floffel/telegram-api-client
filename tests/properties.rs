@@ -6,8 +6,8 @@ use serde_json::{Map, Value};
 use std::time::Duration;
 use telegram_api_client::{
     guess_mime, is_idempotent, is_valid_mime, send::MAX_POLL_OPTION, AnswerCallbackQuery,
-    AnswerInlineQuery, ChatId, ChatMember, ChatMemberPresence, ChatMemberStatus, CopyMessage,
-    EditMessageMedia, EditMessageText, EditTarget, EntityKind, Error, File, GetFile,
+    AnswerInlineQuery, BanChatMember, ChatId, ChatMember, ChatMemberPresence, ChatMemberStatus,
+    CopyMessage, EditMessageMedia, EditMessageText, EditTarget, EntityKind, Error, File, GetFile,
     InlineQueryResult, InlineQueryResultsButton, InputMedia, InputMediaKind, MenuButton,
     MessageEntity, MessageReactionCountUpdated, MockTransport, MultipartFile, MultipartForm,
     ParseMode, PollType, ReactionCount, RetryPolicy, SendAnimation, SendAudio, SendDocument,
@@ -18,6 +18,23 @@ use telegram_api_client::{
 
 proptest! {
     #![proptest_config(ProptestConfig { cases: 96, ..ProptestConfig::default() })]
+
+    /// A temporary ban is accepted exactly inside Telegram's inclusive window.
+    /// The permanent spellings are accepted without consulting the window.
+    #[test]
+    fn ban_expiry_accepts_exactly_the_temporary_window(
+        now in 0_i64..(i64::MAX - 366 * 24 * 60 * 60),
+        date in prop::option::of(any::<i64>()),
+    ) {
+        let request = BanChatMember::new(1_i64, 42);
+        let mut request = request;
+        request.until_date = date;
+        let expected = date.is_none_or(|date| {
+            date == 0
+                || (now + 30..=now + 366 * 24 * 60 * 60).contains(&date)
+        });
+        prop_assert_eq!(request.validate_at(now).is_ok(), expected, "{:?} at {}", date, now);
+    }
 
     /// Arbitrary Unicode — including NUL, control characters and astral-plane
     /// emoji — must survive JSON serialization byte-for-byte.

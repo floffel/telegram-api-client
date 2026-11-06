@@ -57,6 +57,18 @@ means for this API is spelled out in the README under
   (`member.user` is now `member.user()`) or build the struct literally (use
   `ChatMember::new` or the payload structs).
 
+- **`BanChatMember` rejects expiries Telegram would make permanent** (#28).
+  Telegram treats a nonzero `until_date` less than 30 seconds or more than 366
+  days from the request time as a permanent ban. `validate()` now checks that
+  window against the system clock, and the new `validate_at(now)` provides the
+  same deterministic check for callers and tests. `None` and `Some(0)` remain
+  the explicit permanent-ban forms. This is **breaking** for callers that
+  submit a stale, near-past or over-one-year timestamp: those requests used to
+  reach Telegram and create a permanent ban, but now fail locally with
+  `Error::InvalidRequest { field: "until_date", .. }` before the transport is
+  called. Boundary, doctest and property coverage pins `now + 29`/`now + 30`
+  and `now + 366 days`/`now + 366 days + 1`; the wire contract is recorded in
+  `docs/contracts.md`.
 - **`File` now requires valid identifiers and preserves future fields** (#51,
   #54, #53). `file_id` and `file_unique_id` were marked `serde(default)`, so an
   empty or truncated `getFile` result decoded into a fabricated empty file.
