@@ -154,6 +154,34 @@ the status alone does not say whether a restricted user is in the chat.
 | Source URL | <https://core.telegram.org/bots/api#chatmemberrestricted> |
 | Fetched | 2026-11-02 |
 
+## `BanChatMember.until_date`
+
+Quote, `banChatMember` `until_date`: *"Date when the user will be unbanned; Unix
+time. If user is banned for more than 366 days or less than 30 seconds from the
+current time they are considered to be banned forever."*
+
+`0` is Telegram's explicit permanent-ban spelling, and omitting the field means
+the same. For a nonzero temporary ban, `BanChatMember::validate_at(now)` accepts
+exactly the inclusive window `now + 30 seconds ..= now + 366 days`.
+`BanChatMember::validate()` delegates to it with the current system clock.
+Timestamps below or above that window are rejected locally because Telegram
+would otherwise silently make them permanent. A clock before the Unix epoch or
+a window that overflows `i64` fails closed.
+
+| Test | `now` | `until_date` | Result |
+| --- | --- | --- | --- |
+| too soon | `n` | `n + 29` | rejected |
+| earliest temporary ban | `n` | `n + 30` | accepted |
+| latest temporary ban | `n` | `n + 366 days` | accepted |
+| too far | `n` | `n + 366 days + 1` | rejected |
+| permanent, omitted | `n` | `None` | accepted |
+| permanent, explicit | `n` | `0` | accepted |
+
+| Item | Value |
+| --- | --- |
+| Source URL | <https://core.telegram.org/bots/api#banchatmember> |
+| Fetched | 2026-11-06 |
+
 ## Edit addressing: `chat_id`/`message_id` vs `inline_message_id`
 
 The four edit methods (`editMessageText`, `editMessageCaption`,

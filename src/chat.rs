@@ -1,5 +1,7 @@
 //! Chat administration: actions, lookups, bans and pins.
 
+use std::time::{SystemTime, UNIX_EPOCH};
+
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::{Map, Value};
 
@@ -7,6 +9,11 @@ use crate::error::{Error, Result};
 use crate::send::{validate_chat, validate_thread};
 use crate::types::{ChatAction, ChatId, ChatMemberStatus};
 use crate::update::User;
+
+/// Telegram treats bans shorter than this as permanent.
+const MIN_BAN_SECONDS: i64 = 30;
+/// Telegram treats bans longer than this as permanent.
+const MAX_BAN_SECONDS: i64 = 366 * 24 * 60 * 60;
 
 /// `sendChatAction` body — the "typing…" indicator.
 ///
@@ -175,7 +182,12 @@ pub struct BanChatMember {
     pub chat_id: ChatId,
     /// User to ban.
     pub user_id: i64,
-    /// Unix time until the ban expires; `0` means forever.
+    /// Unix time until the ban expires; `None` and `0` mean forever.
+    ///
+    /// A nonzero timestamp is temporary only when it is between 30 seconds and
+    /// 366 days after the request is validated. Telegram treats timestamps
+    /// outside that window as permanent bans, so validation rejects them
+    /// locally instead.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub until_date: Option<i64>,
     /// Also delete the user's recent messages.
@@ -209,13 +221,74 @@ impl BanChatMember {
         self
     }
 
-    /// Checks chat, user id and expiry.
+    /// Checks chat, user id and expiry against the current clock.
+    ///
+    /// This is [`Self::validate_at`] with `now` read from the system clock.
+    /// Validation fails closed if the clock cannot be represented as a
+    /// non-negative Unix timestamp.
     ///
     /// # Errors
     ///
     /// [`Error::InvalidRequest`] for an unusable chat, a non-positive user id,
-    /// or a negative expiry.
+    /// an expiry outside Telegram's temporary-ban window, or an unusable system
+    /// clock.
     pub fn validate(&self) -> Result<()> {
+        if self.until_date.is_none_or(|date| date == 0) {
+            return self.validate_target();
+        }
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|_| Error::InvalidRequest {
+                field: "until_date",
+                reason: "cannot validate against a system clock before the Unix epoch".to_string(),
+            })?
+            .as_secs();
+        let now = i64::try_from(now).map_err(|_| Error::InvalidRequest {
+            field: "until_date",
+            reason: "system clock is outside the supported Unix timestamp range".to_string(),
+        })?;
+        self.validate_at(now)
+    }
+
+    /// Checks chat, user id and expiry against the supplied Unix timestamp.
+    ///
+    /// A temporary ban must have an `until_date` from `now + 30 seconds` through
+    /// `now + 366 days`, inclusive. Both bounds come from Telegram's
+    /// `banChatMember` contract: a shorter or longer ban is applied as a
+    /// permanent ban. `None` and `Some(0)` are the explicit permanent forms and
+    /// remain valid. A negative or overflowing `now` is rejected.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidRequest`] for an unusable chat, a non-positive user id,
+    /// an expiry outside the temporary-ban window, or an unusable `now`.
+    ///
+    /// ```
+    /// use telegram_api_client::{BanChatMember, Error};
+    ///
+    /// let now = 1_800_000_000;
+    /// let within_half_minute = BanChatMember::new(-1001, 42).until(now + 29);
+    /// assert!(matches!(
+    ///     within_half_minute.validate_at(now),
+    ///     Err(Error::InvalidRequest { field: "until_date", .. })
+    /// ));
+    ///
+    /// let thirty_seconds = BanChatMember::new(-1001, 42).until(now + 30);
+    /// assert!(thirty_seconds.validate_at(now).is_ok());
+    ///
+    /// let one_year = BanChatMember::new(-1001, 42).until(now + 366 * 24 * 60 * 60);
+    /// assert!(one_year.validate_at(now).is_ok());
+    ///
+    /// let just_over_one_year =
+    ///     BanChatMember::new(-1001, 42).until(now + 366 * 24 * 60 * 60 + 1);
+    /// assert!(just_over_one_year.validate_at(now).is_err());
+    /// ```
+    pub fn validate_at(&self, now: i64) -> Result<()> {
+        self.validate_target()?;
+        self.validate_expiry_at(now)
+    }
+
+    fn validate_target(&self) -> Result<()> {
         validate_chat("chat_id", &self.chat_id)?;
         if self.user_id <= 0 {
             return Err(Error::InvalidRequest {
@@ -223,10 +296,36 @@ impl BanChatMember {
                 reason: format!("must be positive, got {}", self.user_id),
             });
         }
-        if self.until_date.is_some_and(|date| date < 0) {
+        Ok(())
+    }
+
+    fn validate_expiry_at(&self, now: i64) -> Result<()> {
+        let Some(date) = self.until_date else {
+            return Ok(());
+        };
+        if date == 0 {
+            return Ok(());
+        }
+        if now < 0 {
             return Err(Error::InvalidRequest {
                 field: "until_date",
-                reason: "must be 0 (forever) or a future unix timestamp".to_string(),
+                reason: format!("cannot validate with negative Unix time {now}"),
+            });
+        }
+
+        let earliest = now.checked_add(MIN_BAN_SECONDS);
+        let latest = now.checked_add(MAX_BAN_SECONDS);
+        if !matches!((earliest, latest), (Some(start), Some(end)) if (start..=end).contains(&date))
+        {
+            let window = match (earliest, latest) {
+                (Some(start), Some(end)) => format!("{start}..={end}"),
+                _ => "an unrepresentable range".to_string(),
+            };
+            return Err(Error::InvalidRequest {
+                field: "until_date",
+                reason: format!(
+                    "must be 0 (forever) or within {window} (30 seconds through 366 days from now), got {date}"
+                ),
             });
         }
         Ok(())
