@@ -14,7 +14,7 @@
 //!
 //! # async fn demo() -> telegram_api_client::Result<()> {
 //! let transport = MockTransport::new();
-//! let client = TelegramClient::new("123:ABC", transport.clone());
+//! let client = TelegramClient::try_new("123:ABC", transport.clone()).unwrap();
 //!
 //! let sent = client.send_message_request(&SendMessage::new(-1001, "ping")).await?;
 //! assert_eq!(transport.last_call().unwrap().method(), "sendMessage");

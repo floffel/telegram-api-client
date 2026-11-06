@@ -19,7 +19,9 @@ const CHAT: i64 = -1001;
 fn client() -> (TelegramClient<MockTransport>, MockTransport) {
     let transport = MockTransport::new();
     (
-        TelegramClient::new("123:ABC", transport.clone()).without_retry(),
+        TelegramClient::try_new("123:ABC", transport.clone())
+            .unwrap()
+            .without_retry(),
         transport,
     )
 }
@@ -1630,7 +1632,7 @@ fn empty_secret_fails_closed() {
 
 #[test]
 fn secrets_never_appear_in_debug_output() {
-    let client = TelegramClient::new("123:SECRET", MockTransport::new());
+    let client = TelegramClient::try_new("123:SECRET", MockTransport::new()).unwrap();
     assert!(!format!("{client:?}").contains("SECRET"));
 
     let guard = WebhookGuard::new("super-secret").unwrap();

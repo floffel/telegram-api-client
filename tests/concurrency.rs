@@ -28,7 +28,9 @@ async fn one_client_serves_many_tasks() {
     const TASKS: usize = 64;
 
     let transport = MockTransport::new();
-    let client = TelegramClient::new("123:ABC", transport.clone()).with_base_url("https://tg.test");
+    let client = TelegramClient::try_new("123:ABC", transport.clone())
+        .unwrap()
+        .with_base_url("https://tg.test");
 
     let mut handles = Vec::new();
     for index in 1..=TASKS {
@@ -67,7 +69,7 @@ async fn one_client_serves_many_tasks() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn shared_transport_is_not_corrupted_by_parallel_writes() {
     let transport = MockTransport::new();
-    let client = TelegramClient::new("123:ABC", transport.clone());
+    let client = TelegramClient::try_new("123:ABC", transport.clone()).unwrap();
 
     let mut handles = Vec::new();
     for index in 1..=16 {

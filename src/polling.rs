@@ -47,7 +47,7 @@
 //!     {"update_id": 7, "message": {"message_id": 1, "chat": {"id": -1}, "text": "one"}},
 //!     {"update_id": 8, "message": {"message_id": 2, "chat": {"id": -1}, "text": "two"}}
 //! ])));
-//! let client = TelegramClient::new("123:ABC", transport.clone());
+//! let client = TelegramClient::try_new("123:ABC", transport.clone()).unwrap();
 //!
 //! let shutdown = AtomicBool::new(false);
 //! let mut cursor = UpdateCursor::new();

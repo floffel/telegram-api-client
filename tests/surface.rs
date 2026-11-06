@@ -594,8 +594,9 @@ fn update_accessors_answer_for_every_shape() {
 
 #[test]
 fn client_accessors_and_file_urls() {
-    let client =
-        TelegramClient::new("1:A", MockTransport::new()).with_base_url("https://proxy.test/");
+    let client = TelegramClient::try_new("1:A", MockTransport::new())
+        .unwrap()
+        .with_base_url("https://proxy.test/");
     assert_eq!(client.base_url(), "https://proxy.test/");
 
     let file: File = serde_json::from_value(json!({

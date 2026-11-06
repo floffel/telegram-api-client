@@ -63,7 +63,8 @@ fn client_with(
     let transport = MockTransport::new();
     transport.extend(replies);
     let sleeper = RecordingSleeper::default();
-    let client = TelegramClient::new("123:ABC", transport.clone())
+    let client = TelegramClient::try_new("123:ABC", transport.clone())
+        .unwrap()
         .with_base_url("https://tg.test")
         .with_sleeper(sleeper.clone());
     (client, transport, sleeper)
@@ -325,7 +326,9 @@ async fn a_5xx_on_a_multipart_upload_is_ambiguous_too() {
 async fn retries_can_be_switched_off() {
     let transport = MockTransport::new();
     transport.extend([MockReply::rate_limited(2), MockReply::result(message())]);
-    let client = TelegramClient::new("123:ABC", transport.clone()).without_retry();
+    let client = TelegramClient::try_new("123:ABC", transport.clone())
+        .unwrap()
+        .without_retry();
 
     let error = client
         .send_message_request(&SendMessage::new(-1001, "hi"))
@@ -340,7 +343,7 @@ async fn retries_can_be_switched_off() {
 async fn the_default_client_retries_a_429_with_its_own_sleeper() {
     let transport = MockTransport::new();
     transport.extend([MockReply::rate_limited(0), MockReply::result(message())]);
-    let client = TelegramClient::new("123:ABC", transport.clone());
+    let client = TelegramClient::try_new("123:ABC", transport.clone()).unwrap();
 
     client
         .send_message_request(&SendMessage::new(-1001, "hi"))
@@ -420,9 +423,13 @@ fn the_classification_matrix_is_explicit() {
 
 #[test]
 fn a_custom_budget_is_used() {
-    let client = TelegramClient::new("123:ABC", MockTransport::new()).with_retry_policy(
-        RetryPolicy::new(7, Duration::from_millis(1), Duration::from_secs(1)),
-    );
+    let client = TelegramClient::try_new("123:ABC", MockTransport::new())
+        .unwrap()
+        .with_retry_policy(RetryPolicy::new(
+            7,
+            Duration::from_millis(1),
+            Duration::from_secs(1),
+        ));
     assert_eq!(client.retry_policy().max_attempts, 7);
 }
 
@@ -492,7 +499,9 @@ fn raw_client(
 ) -> (TelegramClient<RawEnvelope>, RawEnvelope, RecordingSleeper) {
     let transport = RawEnvelope::new(replies);
     let sleeper = RecordingSleeper::default();
-    let client = TelegramClient::new("123:ABC", transport.clone()).with_sleeper(sleeper.clone());
+    let client = TelegramClient::try_new("123:ABC", transport.clone())
+        .unwrap()
+        .with_sleeper(sleeper.clone());
     (client, transport, sleeper)
 }
 

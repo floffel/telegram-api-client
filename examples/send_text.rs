@@ -38,7 +38,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     // The token is redacted in `Debug`; the client never prints it.
-    let client = TelegramClient::new(token, ReqwestTransport::new());
+    let client = TelegramClient::try_new(token, ReqwestTransport::new()).unwrap();
 
     match client.send_message_request(&request).await {
         Ok(message) => println!("sent as message {}", message.message_id),

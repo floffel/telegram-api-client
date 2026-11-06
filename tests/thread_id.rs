@@ -242,7 +242,9 @@ fn the_other_delivery_flags_stay_unchecked() {
 async fn an_invalid_thread_stops_before_the_transport() {
     let transport = MockTransport::new();
     transport.push(MockReply::result(serde_json::json!(true)));
-    let client = TelegramClient::new("123:ABC", transport.clone()).without_retry();
+    let client = TelegramClient::try_new("123:ABC", transport.clone())
+        .unwrap()
+        .without_retry();
 
     let mut action = SendChatAction::typing(CHAT);
     action.message_thread_id = Some(0);
@@ -275,7 +277,9 @@ async fn an_invalid_thread_stops_before_the_transport() {
 async fn an_invalid_thread_stops_a_send_message_too() {
     let transport = MockTransport::new();
     transport.push(MockReply::ok());
-    let client = TelegramClient::new("123:ABC", transport.clone()).without_retry();
+    let client = TelegramClient::try_new("123:ABC", transport.clone())
+        .unwrap()
+        .without_retry();
 
     let mut request = SendMessage::new(CHAT, "hi");
     request.options.delivery.message_thread_id = Some(-3);

@@ -49,7 +49,7 @@ async fn main() -> Result<()> {
     let mut cursor = UpdateCursor::after(40);
 
     if let Ok(token) = env::var("TELEGRAM_BOT_TOKEN") {
-        let client = TelegramClient::new(token, ReqwestTransport::new());
+        let client = TelegramClient::try_new(token, ReqwestTransport::new()).unwrap();
         drain(&client, &mut cursor, "live").await?;
     } else {
         // The same batch Telegram sends after a restart: id 41 twice (a
@@ -64,7 +64,7 @@ async fn main() -> Result<()> {
 
         let transport = MockTransport::new();
         transport.push(MockReply::result(payload));
-        let client = TelegramClient::new("123:ABC", transport);
+        let client = TelegramClient::try_new("123:ABC", transport).unwrap();
 
         drain(&client, &mut cursor, "mock").await?;
         // The offset is the confirmation: Telegram reads `offset = n` as

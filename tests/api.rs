@@ -30,7 +30,9 @@ fn client_with(reply: MockReply) -> (TelegramClient<MockTransport>, MockTranspor
     let transport = MockTransport::new();
     transport.push(reply);
     (
-        TelegramClient::new(TOKEN, transport.clone()).with_base_url("https://tg.test"),
+        TelegramClient::try_new(TOKEN, transport.clone())
+            .unwrap()
+            .with_base_url("https://tg.test"),
         transport,
     )
 }
@@ -68,7 +70,9 @@ fn assert_call(transport: &MockTransport, method: &str, body: Value) {
 async fn send_message_variants() {
     // Typed one-liner posts the minimal body.
     let transport = MockTransport::new();
-    let client = TelegramClient::new(TOKEN, transport.clone()).with_base_url("https://tg.test");
+    let client = TelegramClient::try_new(TOKEN, transport.clone())
+        .unwrap()
+        .with_base_url("https://tg.test");
     client.send_text(CHAT, "Hallo").await.unwrap();
     assert_call(
         &transport,
@@ -640,7 +644,7 @@ async fn get_me_both_flavours() {
     assert_call(&transport, "getMe", json!({}));
 
     let transport = MockTransport::new();
-    let client = TelegramClient::new(TOKEN, transport.clone());
+    let client = TelegramClient::try_new(TOKEN, transport.clone()).unwrap();
     client.me().await.unwrap();
     assert_eq!(only_call(&transport).method(), "getMe");
 }
@@ -651,7 +655,9 @@ async fn get_me_both_flavours() {
 #[allow(deprecated)]
 async fn legacy_raw_methods_keep_their_signatures() {
     let transport = MockTransport::new();
-    let client = TelegramClient::new(TOKEN, transport.clone()).with_base_url("https://tg.test");
+    let client = TelegramClient::try_new(TOKEN, transport.clone())
+        .unwrap()
+        .with_base_url("https://tg.test");
 
     let envelope: Value = client.send_message(CHAT, "Hallo").await.unwrap();
     assert_eq!(envelope["ok"], true);
@@ -673,7 +679,9 @@ async fn legacy_raw_methods_keep_their_signatures() {
 #[allow(deprecated)]
 async fn legacy_send_message_validates_before_posting() {
     let transport = MockTransport::new();
-    let client = TelegramClient::new(TOKEN, transport.clone()).with_base_url("https://tg.test");
+    let client = TelegramClient::try_new(TOKEN, transport.clone())
+        .unwrap()
+        .with_base_url("https://tg.test");
 
     for (chat, text, field) in [
         (CHAT, "", "text"),
@@ -699,7 +707,9 @@ async fn legacy_send_message_validates_before_posting() {
 #[allow(deprecated)]
 async fn legacy_send_message_text_boundary_pair() {
     let transport = MockTransport::new();
-    let client = TelegramClient::new(TOKEN, transport.clone()).with_base_url("https://tg.test");
+    let client = TelegramClient::try_new(TOKEN, transport.clone())
+        .unwrap()
+        .with_base_url("https://tg.test");
 
     let at_limit = "a".repeat(MAX_MESSAGE_TEXT);
     let envelope = client.send_message(CHAT, &at_limit).await.unwrap();

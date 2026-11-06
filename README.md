@@ -28,7 +28,7 @@ ambiguous failure stay in the caller.
 use telegram_api_client::{ReqwestTransport, SendMessage, SetWebhook, TelegramClient};
 
 # async fn demo() -> telegram_api_client::Result<()> {
-let client = TelegramClient::new("123:ABC", ReqwestTransport::new());
+let client = TelegramClient::try_new("123:ABC", ReqwestTransport::new()).unwrap();
 
 client.send_message_request(&SendMessage::new(-1001, "ping")).await?;
 client.set_webhook(&SetWebhook::new("https://example.com/hook").with_secret("s3cret")).await?;
@@ -43,7 +43,7 @@ use telegram_api_client::{MockReply, MockTransport, SendPhoto, TelegramClient};
 # async fn demo() -> telegram_api_client::Result<()> {
 let transport = MockTransport::new();
 transport.push(MockReply::result(serde_json::json!({"message_id": 7})));
-let client = TelegramClient::new("123:ABC", transport.clone());
+let client = TelegramClient::try_new("123:ABC", transport.clone()).unwrap();
 
 client.send_photo(&SendPhoto::new(1, "file-id")).await?;
 assert_eq!(transport.last_call().unwrap().method(), "sendPhoto");
@@ -56,7 +56,7 @@ Uploading a local file instead of referencing one:
 use telegram_api_client::{ReqwestTransport, SendPhoto, TelegramClient, UploadFile};
 
 # async fn demo() -> telegram_api_client::Result<()> {
-let client = TelegramClient::new("123:ABC", ReqwestTransport::new());
+let client = TelegramClient::try_new("123:ABC", ReqwestTransport::new()).unwrap();
 let photo = SendPhoto::new(-1001, "ignored").with_upload(UploadFile::from_path("cat.png")?);
 client.send_photo(&photo).await?;
 # Ok(()) }

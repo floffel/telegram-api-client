@@ -40,7 +40,8 @@ fn serve_once(status_line: &'static str, body: &'static str) -> (u16, Receiver<S
 }
 
 fn client(port: u16) -> TelegramClient<ReqwestTransport> {
-    TelegramClient::new("123:ABC", ReqwestTransport::new())
+    TelegramClient::try_new("123:ABC", ReqwestTransport::new())
+        .unwrap()
         .with_base_url(format!("http://127.0.0.1:{port}"))
 }
 
@@ -243,7 +244,7 @@ async fn a_refused_connection_is_retried_within_the_budget() {
     assert!(error.is_retryable());
 
     // A JSON-only mock never sees a socket: it proves the client stays generic.
-    let mock = TelegramClient::new("1:A", MockTransport::new());
+    let mock = TelegramClient::try_new("1:A", MockTransport::new()).unwrap();
     assert!(mock.send_text(-1_i64, "hi").await.is_ok());
 }
 
@@ -429,14 +430,16 @@ async fn an_oversized_answer_is_not_retried_under_a_retry_budget() {
         body,
     );
 
-    let client = TelegramClient::new("1:A", ReqwestTransport::new().with_max_response_bytes(64))
-        .with_base_url(format!("http://127.0.0.1:{port}"))
-        .with_sleeper(NoDelay)
-        .with_retry_policy(RetryPolicy::new(
-            3,
-            std::time::Duration::from_millis(1),
-            std::time::Duration::from_millis(2),
-        ));
+    let client =
+        TelegramClient::try_new("1:A", ReqwestTransport::new().with_max_response_bytes(64))
+            .unwrap()
+            .with_base_url(format!("http://127.0.0.1:{port}"))
+            .with_sleeper(NoDelay)
+            .with_retry_policy(RetryPolicy::new(
+                3,
+                std::time::Duration::from_millis(1),
+                std::time::Duration::from_millis(2),
+            ));
 
     let error = client
         .send_text(-1001_i64, "hi")
