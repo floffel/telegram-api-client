@@ -10,6 +10,14 @@ means for this API is spelled out in the README under
 
 ### Added
 
+- **`TelegramClient::try_new` validates the bot token before construction**
+  (#30). It trims leading and trailing whitespace and rejects an empty result
+  with the existing non-retryable `Error::EmptySecret`, so a malformed
+  `/bot/` method URL can no longer be built through the recommended
+  constructor. `TelegramClient::new` keeps its signature and behavior so
+  existing code still compiles, but it is deprecated and directs callers to
+  `try_new`; every in-crate call site, example, test and README snippet now
+  uses the checked constructor.
 - **`MAX_RESPONSE_BYTES`: a response body is bounded before it is parsed**
   (#32). The bundled `ReqwestTransport` now reads at most 16 MiB and reports a
   larger answer as the new `Error::ResponseTooLarge { method, limit }` instead

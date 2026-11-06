@@ -353,7 +353,7 @@ proptest! {
             "file_unique_id": "u",
             "file_path": path,
         })).unwrap();
-        let client = TelegramClient::new("1:A", MockTransport::new());
+        let client = TelegramClient::try_new("1:A", MockTransport::new()).unwrap();
         let url = client.file_url(&file).unwrap();
         let parsed = url::Url::parse(&url).unwrap();
         prop_assert_eq!(parsed.query(), None);
@@ -377,7 +377,7 @@ proptest! {
             prop_assert!(!path.starts_with('/'));
             prop_assert!(!path.contains(['?', '#', '\\']));
             prop_assert!(!path.chars().any(char::is_control));
-            let client = TelegramClient::new("1:A", MockTransport::new());
+            let client = TelegramClient::try_new("1:A", MockTransport::new()).unwrap();
             let url = url::Url::parse(&client.file_url(&file).unwrap()).unwrap();
             prop_assert_eq!(url.query(), None);
             prop_assert_eq!(url.fragment(), None);

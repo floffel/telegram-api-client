@@ -33,10 +33,48 @@ fn recorder(reply: Value) -> Recorder {
     }
 }
 
+#[test]
+fn try_new_rejects_empty_and_whitespace_only_tokens_without_using_the_transport() {
+    let rec = recorder(json!({}));
+
+    assert!(matches!(
+        TelegramClient::try_new("", rec.clone()),
+        Err(Error::EmptySecret)
+    ));
+    for whitespace in [" ", "\t", "\n", " \t\r\n "] {
+        assert!(
+            matches!(
+                TelegramClient::try_new(whitespace, rec.clone()),
+                Err(Error::EmptySecret)
+            ),
+            "accepted whitespace-only token {whitespace:?}"
+        );
+    }
+
+    assert!(rec.calls.lock().unwrap().is_empty());
+}
+
+#[test]
+fn try_new_trims_a_valid_token_before_building_urls() {
+    let client = TelegramClient::try_new(" \t123:ABC\r\n", recorder(json!({}))).unwrap();
+
+    assert_eq!(
+        client.method_url("getMe"),
+        "https://api.telegram.org/bot123:ABC/getMe"
+    );
+}
+
+#[test]
+fn a_client_always_has_a_nonempty_token_segment() {
+    let client = TelegramClient::try_new("t", recorder(json!({}))).unwrap();
+
+    assert!(!client.method_url("getMe").contains("/bot//"));
+}
+
 #[tokio::test]
 async fn send_message_posts_chat_id_and_text() {
     let rec = recorder(json!({"ok": true, "result": {"message_id": 1}}));
-    let client = TelegramClient::new("123:ABC", rec.clone());
+    let client = TelegramClient::try_new("123:ABC", rec.clone()).unwrap();
 
     client.send_text(-1001, "Hallo").await.unwrap();
 
@@ -50,7 +88,7 @@ async fn send_message_posts_chat_id_and_text() {
 #[tokio::test]
 async fn get_me_hits_its_own_method() {
     let rec = recorder(json!({"ok": true, "result": {"id": 1}}));
-    let client = TelegramClient::new("123:ABC", rec.clone());
+    let client = TelegramClient::try_new("123:ABC", rec.clone()).unwrap();
     client.me().await.unwrap();
     let calls = rec.calls.lock().unwrap().clone();
     assert!(calls[0].0.ends_with("/getMe"));
@@ -60,13 +98,15 @@ async fn get_me_hits_its_own_method() {
 fn base_url_is_configurable() {
     let rec = recorder(json!({}));
     let host = ["https:/", "/api.example.com"].join("");
-    let client = TelegramClient::new("t", rec).with_base_url(host.clone());
+    let client = TelegramClient::try_new("t", rec)
+        .unwrap()
+        .with_base_url(host.clone());
     assert_eq!(client.method_url("getMe"), format!("{host}/bott/getMe"));
 }
 
 #[test]
 fn debug_does_not_leak_the_token() {
-    let client = TelegramClient::new("123:SECRET", recorder(json!({})));
+    let client = TelegramClient::try_new("123:SECRET", recorder(json!({}))).unwrap();
     let rendered = format!("{client:?}");
     assert!(!rendered.contains("SECRET"), "token im Debug: {rendered}");
 }
@@ -83,7 +123,7 @@ async fn legacy_send_message_surfaces_a_failed_envelope() {
         "error_code": 400,
         "description": "Bad Request: chat not found"
     }));
-    let client = TelegramClient::new("123:ABC", rec.clone());
+    let client = TelegramClient::try_new("123:ABC", rec.clone()).unwrap();
 
     let error = client.send_message(-1001, "Hallo").await.unwrap_err();
 
@@ -104,7 +144,7 @@ async fn legacy_get_me_surfaces_a_failed_envelope() {
         "error_code": 401,
         "description": "Unauthorized"
     }));
-    let client = TelegramClient::new("123:ABC", rec.clone());
+    let client = TelegramClient::try_new("123:ABC", rec.clone()).unwrap();
 
     let error = client.get_me().await.unwrap_err();
 
@@ -127,7 +167,9 @@ async fn legacy_wrappers_surface_a_rate_limited_envelope() {
     // `NoDelay`: the retry budget is what this test pins, not the clock. A 429 is
     // the one body-level failure the loop may repeat (nothing was processed), so
     // the wrapper's answer arrives only after that budget is spent.
-    let client = TelegramClient::new("123:ABC", rec.clone()).with_sleeper(NoDelay);
+    let client = TelegramClient::try_new("123:ABC", rec.clone())
+        .unwrap()
+        .with_sleeper(NoDelay);
 
     let me = client.get_me().await.unwrap_err();
     assert!(matches!(me, Error::RateLimited { .. }), "{me:?}");
@@ -151,7 +193,7 @@ async fn legacy_wrappers_surface_a_rate_limited_envelope() {
 #[allow(deprecated)]
 async fn legacy_wrappers_reject_an_envelope_without_result() {
     let rec = recorder(json!({ "ok": true }));
-    let client = TelegramClient::new("123:ABC", rec.clone());
+    let client = TelegramClient::try_new("123:ABC", rec.clone()).unwrap();
 
     // A read keeps the decoding error: nothing changed, repeating is free.
     let me = client.get_me().await.unwrap_err();

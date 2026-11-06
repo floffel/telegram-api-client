@@ -476,7 +476,7 @@ pub const MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 ```
 # use telegram_api_client::{ReqwestTransport, TelegramClient};
 # async fn demo() -> telegram_api_client::Result<()> {
-let client = TelegramClient::new("123:ABC", ReqwestTransport::new());
+let client = TelegramClient::try_new("123:ABC", ReqwestTransport::new()).unwrap();
 client.get_me().await?;
 # Ok(()) }
 ```
@@ -955,7 +955,7 @@ struct Inner {
 /// # async fn demo() -> telegram_api_client::Result<()> {
 /// let transport = MockTransport::new();
 /// transport.push(MockReply::result(serde_json::json!({"message_id": 1})));
-/// let client = TelegramClient::new("123:ABC", transport.clone());
+/// let client = TelegramClient::try_new("123:ABC", transport.clone()).unwrap();
 ///
 /// let _ = client.send_message(42, "hi").await?;
 /// assert_eq!(transport.calls().len(), 1);

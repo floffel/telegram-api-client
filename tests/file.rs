@@ -143,8 +143,9 @@ fn unsafe_paths_are_rejected_during_decoding() {
 
 #[test]
 fn download_urls_percent_encode_each_segment() {
-    let client =
-        TelegramClient::new("1:A", MockTransport::new()).with_base_url("https://proxy.test/base/");
+    let client = TelegramClient::try_new("1:A", MockTransport::new())
+        .unwrap()
+        .with_base_url("https://proxy.test/base/");
     let file: File = serde_json::from_value(json!({
         "file_id": "A",
         "file_unique_id": "u",
@@ -169,7 +170,7 @@ fn manually_constructed_unsafe_paths_never_report_downloadable() {
     assert_eq!(file.download_path(), None);
     assert!(!file.is_downloadable());
     assert_eq!(file.fits_download_limit(), Some(true));
-    let client = TelegramClient::new("1:A", MockTransport::new());
+    let client = TelegramClient::try_new("1:A", MockTransport::new()).unwrap();
     assert!(matches!(
         client.file_url(&file),
         Err(Error::Unexpected { .. })

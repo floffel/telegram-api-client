@@ -33,11 +33,11 @@
 //! }
 //!
 //! # async fn demo() -> Result<()> {
-//! let client = TelegramClient::new("123:ABC", RawEnvelope).without_retry();
+//! let client = TelegramClient::try_new("123:ABC", RawEnvelope).unwrap().without_retry();
 //! let error = client.me().await.unwrap_err();
 //! assert!(matches!(error, Error::RateLimited { code: 429, .. }), "{error:?}");
 //! assert_eq!(error.retry_after(), Some(std::time::Duration::from_secs(2)));
-//! # let _ = TelegramClient::new("123:ABC", MockTransport::new());
+//! # let _ = TelegramClient::try_new("123:ABC", MockTransport::new()).unwrap();
 //! # Ok(()) }
 //! ```
 
@@ -241,7 +241,7 @@ impl Default for RetrySettings {
 /// use telegram_api_client::{MockTransport, TelegramClient};
 ///
 /// # async fn demo() -> telegram_api_client::Result<()> {
-/// let client = TelegramClient::new("123:ABC", MockTransport::new());
+/// let client = TelegramClient::try_new("123:ABC", MockTransport::new()).unwrap();
 /// assert!(client.method_url("getMe").ends_with("/bot123:ABC/getMe"));
 /// # Ok(()) }
 /// ```
@@ -267,20 +267,57 @@ impl<T: Transport + Clone> Clone for TelegramClient<T> {
 }
 
 impl<T: Transport> TelegramClient<T> {
-    /// Creates a client for `token`.
+    /// Creates a client for `token`, rejecting an empty or whitespace-only
+    /// value.
     ///
-    /// An empty token is rejected by the Bot API, not here — the first call
-    /// will fail with [`Error::Api`].
+    /// Leading and trailing whitespace is removed from the stored token. The
+    /// Bot API token format itself is not checked: local Bot API servers and
+    /// tests may use values that do not look like production tokens.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::EmptySecret`] when `token` is empty or contains only
+    /// whitespace. No transport is consulted, and the client cannot be built
+    /// with a token that would produce a malformed method URL.
     ///
     /// ```rust
-    /// use telegram_api_client::{MockTransport, TelegramClient};
+    /// use telegram_api_client::{Error, MockTransport, TelegramClient};
     ///
-    /// let client = TelegramClient::new("123:ABC", MockTransport::new());
+    /// let client = TelegramClient::try_new("  123:ABC\n", MockTransport::new()).unwrap();
     /// assert_eq!(client.base_url(), "https://api.telegram.org");
+    /// assert_eq!(
+    ///     client.method_url("getMe"),
+    ///     "https://api.telegram.org/bot123:ABC/getMe",
+    /// );
+    ///
+    /// assert!(matches!(
+    ///     TelegramClient::try_new(" \t\n", MockTransport::new()),
+    ///     Err(Error::EmptySecret),
+    /// ));
     /// ```
+    pub fn try_new(token: impl Into<String>, transport: T) -> Result<Self> {
+        let token = token.into();
+        let token = token.trim();
+        if token.is_empty() {
+            return Err(Error::EmptySecret);
+        }
+        Ok(Self::with_token(token.to_string(), transport))
+    }
+
+    /// Creates a client without validating `token`.
+    ///
+    /// This constructor is kept for source compatibility. It accepts an empty
+    /// token and can therefore build a malformed `/bot/` URL. Use
+    /// [`Self::try_new`] to reject empty or whitespace-only tokens before any
+    /// request is attempted.
+    #[deprecated(note = "use `TelegramClient::try_new`, which rejects empty tokens")]
     pub fn new(token: impl Into<String>, transport: T) -> Self {
+        Self::with_token(token.into(), transport)
+    }
+
+    fn with_token(token: String, transport: T) -> Self {
         Self {
-            token: token.into(),
+            token,
             base_url: "https://api.telegram.org".to_string(),
             transport,
             retry: RetrySettings::default(),
@@ -300,7 +337,7 @@ impl<T: Transport> TelegramClient<T> {
     /// use std::time::Duration;
     /// use telegram_api_client::{MockTransport, RetryPolicy, TelegramClient};
     ///
-    /// let client = TelegramClient::new("123:ABC", MockTransport::new())
+    /// let client = TelegramClient::try_new("123:ABC", MockTransport::new()).unwrap()
     ///     .with_retry_policy(RetryPolicy::new(1, Duration::from_millis(10), Duration::from_secs(1)));
     /// assert_eq!(client.retry_policy().max_attempts, 1, "no automatic retry");
     /// ```
@@ -315,7 +352,7 @@ impl<T: Transport> TelegramClient<T> {
     /// ```rust
     /// use telegram_api_client::{MockTransport, TelegramClient};
     ///
-    /// let client = TelegramClient::new("123:ABC", MockTransport::new()).without_retry();
+    /// let client = TelegramClient::try_new("123:ABC", MockTransport::new()).unwrap().without_retry();
     /// assert_eq!(client.retry_policy().max_attempts, 1);
     /// ```
     #[must_use]
@@ -330,7 +367,7 @@ impl<T: Transport> TelegramClient<T> {
     /// ```rust
     /// use telegram_api_client::{MockTransport, NoDelay, TelegramClient};
     ///
-    /// let client = TelegramClient::new("123:ABC", MockTransport::new()).with_sleeper(NoDelay);
+    /// let client = TelegramClient::try_new("123:ABC", MockTransport::new()).unwrap().with_sleeper(NoDelay);
     /// # let _ = client;
     /// ```
     #[must_use]
@@ -350,7 +387,7 @@ impl<T: Transport> TelegramClient<T> {
     /// use std::time::Duration;
     /// use telegram_api_client::{Error, MockTransport, RetryPolicy, TelegramClient};
     ///
-    /// let client = TelegramClient::new("123:ABC", MockTransport::new());
+    /// let client = TelegramClient::try_new("123:ABC", MockTransport::new()).unwrap();
     /// let policy = client.retry_policy();
     /// assert_eq!(policy.max_attempts, 3);
     /// assert_eq!(policy.base_delay, Duration::from_millis(500));
@@ -364,7 +401,7 @@ impl<T: Transport> TelegramClient<T> {
     /// assert!(!policy.should_retry(3, &failure), "attempt 3 is the last one");
     ///
     /// // `without_retry` is the floor a budget can reach: one attempt, no retry.
-    /// let once = TelegramClient::new("123:ABC", MockTransport::new()).without_retry();
+    /// let once = TelegramClient::try_new("123:ABC", MockTransport::new()).unwrap().without_retry();
     /// assert_eq!(once.retry_policy().max_attempts, 1);
     /// assert!(!once.retry_policy().should_retry(1, &failure));
     ///
@@ -388,7 +425,7 @@ impl<T: Transport> TelegramClient<T> {
     /// ```
     /// use telegram_api_client::{MockTransport, TelegramClient};
     ///
-    /// let client = TelegramClient::new("1:A", MockTransport::new())
+    /// let client = TelegramClient::try_new("1:A", MockTransport::new()).unwrap()
     ///     .with_base_url("https://proxy.test/");
     /// assert_eq!(client.method_url("getMe"), "https://proxy.test/bot1:A/getMe");
     /// ```
@@ -407,7 +444,7 @@ impl<T: Transport> TelegramClient<T> {
     /// ```
     /// use telegram_api_client::{File, MockTransport, TelegramClient};
     ///
-    /// let client = TelegramClient::new("1:A", MockTransport::new());
+    /// let client = TelegramClient::try_new("1:A", MockTransport::new()).unwrap();
     /// assert_eq!(client.base_url(), "https://api.telegram.org");
     ///
     /// // Stored verbatim, trailing slash and all.
@@ -440,7 +477,7 @@ impl<T: Transport> TelegramClient<T> {
     /// ```
     /// use telegram_api_client::{MockTransport, TelegramClient};
     ///
-    /// let client = TelegramClient::new("123:ABC", MockTransport::new());
+    /// let client = TelegramClient::try_new("123:ABC", MockTransport::new()).unwrap();
     /// assert_eq!(
     ///     client.method_url("sendMessage"),
     ///     "https://api.telegram.org/bot123:ABC/sendMessage",
@@ -466,7 +503,7 @@ impl<T: Transport> TelegramClient<T> {
     /// ```
     /// use telegram_api_client::{File, MockTransport, TelegramClient};
     ///
-    /// let client = TelegramClient::new("123:ABC", MockTransport::new());
+    /// let client = TelegramClient::try_new("123:ABC", MockTransport::new()).unwrap();
     /// let file: File = serde_json::from_str(
     ///     r#"{"file_id":"A","file_unique_id":"u","file_path":"photos/a.jpg"}"#,
     /// ).unwrap();
@@ -587,7 +624,7 @@ impl<T: Transport> TelegramClient<T> {
     /// # async fn demo() -> telegram_api_client::Result<()> {
     /// // An empty text never reaches the network any more.
     /// let transport = MockTransport::new();
-    /// let client = TelegramClient::new("123:ABC", transport.clone());
+    /// let client = TelegramClient::try_new("123:ABC", transport.clone()).unwrap();
     /// # #[allow(deprecated)]
     /// let error = client.send_message(-1001, " ").await.unwrap_err();
     /// assert!(matches!(error, Error::InvalidRequest { field: "text", .. }));
@@ -636,7 +673,7 @@ impl<T: Transport> TelegramClient<T> {
     ///
     /// # async fn demo() -> telegram_api_client::Result<()> {
     /// let transport = MockTransport::new();
-    /// let client = TelegramClient::new("123:ABC", transport.clone());
+    /// let client = TelegramClient::try_new("123:ABC", transport.clone()).unwrap();
     /// let message = client.send_text(-1001, "ping").await?;
     ///
     /// assert_eq!(message.message_id, 0);
@@ -660,7 +697,7 @@ impl<T: Transport> TelegramClient<T> {
         ///
         /// # async fn demo() -> telegram_api_client::Result<()> {
         /// let transport = MockTransport::new();
-        /// let client = TelegramClient::new("123:ABC", transport.clone());
+        /// let client = TelegramClient::try_new("123:ABC", transport.clone()).unwrap();
         /// let message = client
         ///     .send_message_request(&SendMessage::new(-1001, "hi").silent())
         ///     .await?;
@@ -677,7 +714,7 @@ impl<T: Transport> TelegramClient<T> {
         /// use telegram_api_client::{MockTransport, SendPhoto, TelegramClient};
         ///
         /// # async fn demo() -> telegram_api_client::Result<()> {
-        /// let client = TelegramClient::new("123:ABC", MockTransport::new());
+        /// let client = TelegramClient::try_new("123:ABC", MockTransport::new()).unwrap();
         /// client.send_photo(&SendPhoto::new(1, "file-id")).await?;
         /// # Ok(()) }
         /// ```
@@ -691,7 +728,7 @@ impl<T: Transport> TelegramClient<T> {
         /// use telegram_api_client::{MockTransport, SendDocument, TelegramClient};
         ///
         /// # async fn demo() -> telegram_api_client::Result<()> {
-        /// let client = TelegramClient::new("123:ABC", MockTransport::new());
+        /// let client = TelegramClient::try_new("123:ABC", MockTransport::new()).unwrap();
         /// client.send_document(&SendDocument::new(1, "file-id")).await?;
         /// # Ok(()) }
         /// ```
@@ -705,7 +742,7 @@ impl<T: Transport> TelegramClient<T> {
         /// use telegram_api_client::{MockTransport, SendAudio, TelegramClient};
         ///
         /// # async fn demo() -> telegram_api_client::Result<()> {
-        /// let client = TelegramClient::new("123:ABC", MockTransport::new());
+        /// let client = TelegramClient::try_new("123:ABC", MockTransport::new()).unwrap();
         /// client.send_audio(&SendAudio::new(1, "file-id")).await?;
         /// # Ok(()) }
         /// ```
@@ -719,7 +756,7 @@ impl<T: Transport> TelegramClient<T> {
         /// use telegram_api_client::{MockTransport, SendVideo, TelegramClient};
         ///
         /// # async fn demo() -> telegram_api_client::Result<()> {
-        /// let client = TelegramClient::new("123:ABC", MockTransport::new());
+        /// let client = TelegramClient::try_new("123:ABC", MockTransport::new()).unwrap();
         /// client.send_video(&SendVideo::new(1, "file-id")).await?;
         /// # Ok(()) }
         /// ```
@@ -733,7 +770,7 @@ impl<T: Transport> TelegramClient<T> {
         /// use telegram_api_client::{MockTransport, SendAnimation, TelegramClient};
         ///
         /// # async fn demo() -> telegram_api_client::Result<()> {
-        /// let client = TelegramClient::new("123:ABC", MockTransport::new());
+        /// let client = TelegramClient::try_new("123:ABC", MockTransport::new()).unwrap();
         /// client.send_animation(&SendAnimation::new(1, "file-id")).await?;
         /// # Ok(()) }
         /// ```
@@ -747,7 +784,7 @@ impl<T: Transport> TelegramClient<T> {
         /// use telegram_api_client::{MockTransport, SendVoice, TelegramClient};
         ///
         /// # async fn demo() -> telegram_api_client::Result<()> {
-        /// let client = TelegramClient::new("123:ABC", MockTransport::new());
+        /// let client = TelegramClient::try_new("123:ABC", MockTransport::new()).unwrap();
         /// client.send_voice(&SendVoice::new(1, "file-id")).await?;
         /// # Ok(()) }
         /// ```
@@ -761,7 +798,7 @@ impl<T: Transport> TelegramClient<T> {
         /// use telegram_api_client::{InputMedia, MockTransport, SendMediaGroup, TelegramClient};
         ///
         /// # async fn demo() -> telegram_api_client::Result<()> {
-        /// let client = TelegramClient::new("123:ABC", MockTransport::new());
+        /// let client = TelegramClient::try_new("123:ABC", MockTransport::new()).unwrap();
         /// let album = SendMediaGroup::new(1, vec![InputMedia::photo("a"), InputMedia::video("b")]);
         /// client.send_media_group(&album).await?;
         /// # Ok(()) }
@@ -776,7 +813,7 @@ impl<T: Transport> TelegramClient<T> {
         /// use telegram_api_client::{MockTransport, SendLocation, TelegramClient};
         ///
         /// # async fn demo() -> telegram_api_client::Result<()> {
-        /// let client = TelegramClient::new("123:ABC", MockTransport::new());
+        /// let client = TelegramClient::try_new("123:ABC", MockTransport::new()).unwrap();
         /// client.send_location(&SendLocation::new(1, 48.7665, 11.4258)).await?;
         /// # Ok(()) }
         /// ```
@@ -790,7 +827,7 @@ impl<T: Transport> TelegramClient<T> {
         /// use telegram_api_client::{MockTransport, SendVenue, TelegramClient};
         ///
         /// # async fn demo() -> telegram_api_client::Result<()> {
-        /// let client = TelegramClient::new("123:ABC", MockTransport::new());
+        /// let client = TelegramClient::try_new("123:ABC", MockTransport::new()).unwrap();
         /// client.send_venue(&SendVenue::new(1, 48.7, 11.4, "Café", "Am Platz 1")).await?;
         /// # Ok(()) }
         /// ```
@@ -804,7 +841,7 @@ impl<T: Transport> TelegramClient<T> {
         /// use telegram_api_client::{MockTransport, SendContact, TelegramClient};
         ///
         /// # async fn demo() -> telegram_api_client::Result<()> {
-        /// let client = TelegramClient::new("123:ABC", MockTransport::new());
+        /// let client = TelegramClient::try_new("123:ABC", MockTransport::new()).unwrap();
         /// client.send_contact(&SendContact::new(1, "+49151", "Flo")).await?;
         /// # Ok(()) }
         /// ```
@@ -818,7 +855,7 @@ impl<T: Transport> TelegramClient<T> {
         /// use telegram_api_client::{MockTransport, SendPoll, TelegramClient};
         ///
         /// # async fn demo() -> telegram_api_client::Result<()> {
-        /// let client = TelegramClient::new("123:ABC", MockTransport::new());
+        /// let client = TelegramClient::try_new("123:ABC", MockTransport::new()).unwrap();
         /// let poll = SendPoll::new(1, "Lunch?", vec!["Pizza".into(), "Salad".into()]);
         /// client.send_poll(&poll).await?;
         /// # Ok(()) }
@@ -833,7 +870,7 @@ impl<T: Transport> TelegramClient<T> {
         /// use telegram_api_client::{MockTransport, SendDice, TelegramClient};
         ///
         /// # async fn demo() -> telegram_api_client::Result<()> {
-        /// let client = TelegramClient::new("123:ABC", MockTransport::new());
+        /// let client = TelegramClient::try_new("123:ABC", MockTransport::new()).unwrap();
         /// client.send_dice(&SendDice::new(1)).await?;
         /// # Ok(()) }
         /// ```
@@ -849,7 +886,7 @@ impl<T: Transport> TelegramClient<T> {
         /// use telegram_api_client::{EditMessageText, MockTransport, TelegramClient};
         ///
         /// # async fn demo() -> telegram_api_client::Result<()> {
-        /// let client = TelegramClient::new("123:ABC", MockTransport::new());
+        /// let client = TelegramClient::try_new("123:ABC", MockTransport::new()).unwrap();
         /// client.edit_message_text(&EditMessageText::new(1, 7, "new")).await?;
         /// # Ok(()) }
         /// ```
@@ -863,7 +900,7 @@ impl<T: Transport> TelegramClient<T> {
         /// use telegram_api_client::{EditMessageCaption, MockTransport, TelegramClient};
         ///
         /// # async fn demo() -> telegram_api_client::Result<()> {
-        /// let client = TelegramClient::new("123:ABC", MockTransport::new());
+        /// let client = TelegramClient::try_new("123:ABC", MockTransport::new()).unwrap();
         /// client.edit_message_caption(&EditMessageCaption::new(1, 7).with_caption("new")).await?;
         /// # Ok(()) }
         /// ```
@@ -877,7 +914,7 @@ impl<T: Transport> TelegramClient<T> {
         /// use telegram_api_client::{EditMessageReplyMarkup, MockTransport, TelegramClient};
         ///
         /// # async fn demo() -> telegram_api_client::Result<()> {
-        /// let client = TelegramClient::new("123:ABC", MockTransport::new());
+        /// let client = TelegramClient::try_new("123:ABC", MockTransport::new()).unwrap();
         /// client.edit_message_reply_markup(&EditMessageReplyMarkup::new(1, 7)).await?;
         /// # Ok(()) }
         /// ```
@@ -891,7 +928,7 @@ impl<T: Transport> TelegramClient<T> {
         /// use telegram_api_client::{EditMessageMedia, InputMedia, MockTransport, TelegramClient};
         ///
         /// # async fn demo() -> telegram_api_client::Result<()> {
-        /// let client = TelegramClient::new("123:ABC", MockTransport::new());
+        /// let client = TelegramClient::try_new("123:ABC", MockTransport::new()).unwrap();
         /// let edit = EditMessageMedia::new(1, 7, InputMedia::video("DQACAgI"));
         /// client.edit_message_media(&edit).await?;
         /// # Ok(()) }
@@ -906,7 +943,7 @@ impl<T: Transport> TelegramClient<T> {
         /// use telegram_api_client::{DeleteMessage, MockTransport, TelegramClient};
         ///
         /// # async fn demo() -> telegram_api_client::Result<()> {
-        /// let client = TelegramClient::new("123:ABC", MockTransport::new());
+        /// let client = TelegramClient::try_new("123:ABC", MockTransport::new()).unwrap();
         /// let deleted = client.delete_message(&DeleteMessage::new(1, 7)).await?;
         /// assert!(deleted);
         /// # Ok(()) }
@@ -921,7 +958,7 @@ impl<T: Transport> TelegramClient<T> {
         /// use telegram_api_client::{ForwardMessage, MockTransport, TelegramClient};
         ///
         /// # async fn demo() -> telegram_api_client::Result<()> {
-        /// let client = TelegramClient::new("123:ABC", MockTransport::new());
+        /// let client = TelegramClient::try_new("123:ABC", MockTransport::new()).unwrap();
         /// client.forward_message(&ForwardMessage::new(1, -1001, 7)).await?;
         /// # Ok(()) }
         /// ```
@@ -935,7 +972,7 @@ impl<T: Transport> TelegramClient<T> {
         /// use telegram_api_client::{CopyMessage, MockTransport, TelegramClient};
         ///
         /// # async fn demo() -> telegram_api_client::Result<()> {
-        /// let client = TelegramClient::new("123:ABC", MockTransport::new());
+        /// let client = TelegramClient::try_new("123:ABC", MockTransport::new()).unwrap();
         /// let created = client.copy_message(&CopyMessage::new(1, -1001, 7)).await?;
         /// assert_eq!(created.message_id, 0);
         /// # Ok(()) }
@@ -952,7 +989,7 @@ impl<T: Transport> TelegramClient<T> {
         /// use telegram_api_client::{AnswerCallbackQuery, MockTransport, TelegramClient};
         ///
         /// # async fn demo() -> telegram_api_client::Result<()> {
-        /// let client = TelegramClient::new("123:ABC", MockTransport::new());
+        /// let client = TelegramClient::try_new("123:ABC", MockTransport::new()).unwrap();
         /// client.answer_callback_query(&AnswerCallbackQuery::new("4382").with_text("ok")).await?;
         /// # Ok(()) }
         /// ```
@@ -968,7 +1005,7 @@ impl<T: Transport> TelegramClient<T> {
         /// };
         ///
         /// # async fn demo() -> telegram_api_client::Result<()> {
-        /// let client = TelegramClient::new("123:ABC", MockTransport::new());
+        /// let client = TelegramClient::try_new("123:ABC", MockTransport::new()).unwrap();
         /// let results = vec![InlineQueryResult::article("1", "Ping", "Pong")];
         /// client.answer_inline_query(&AnswerInlineQuery::new("q1", results)).await?;
         /// # Ok(()) }
@@ -983,7 +1020,7 @@ impl<T: Transport> TelegramClient<T> {
         /// use telegram_api_client::{MenuButton, MockTransport, SetChatMenuButton, TelegramClient};
         ///
         /// # async fn demo() -> telegram_api_client::Result<()> {
-        /// let client = TelegramClient::new("123:ABC", MockTransport::new());
+        /// let client = TelegramClient::try_new("123:ABC", MockTransport::new()).unwrap();
         /// let request = SetChatMenuButton::global(MenuButton::commands());
         /// client.set_chat_menu_button(&request).await?;
         /// # Ok(()) }
@@ -1000,7 +1037,7 @@ impl<T: Transport> TelegramClient<T> {
         /// use telegram_api_client::{ChatAction, MockTransport, SendChatAction, TelegramClient};
         ///
         /// # async fn demo() -> telegram_api_client::Result<()> {
-        /// let client = TelegramClient::new("123:ABC", MockTransport::new());
+        /// let client = TelegramClient::try_new("123:ABC", MockTransport::new()).unwrap();
         /// client.send_chat_action(&SendChatAction::typing(-1001)).await?;
         /// # let _ = ChatAction::Typing;
         /// # Ok(()) }
@@ -1015,7 +1052,7 @@ impl<T: Transport> TelegramClient<T> {
         /// use telegram_api_client::{GetChat, MockTransport, TelegramClient};
         ///
         /// # async fn demo() -> telegram_api_client::Result<()> {
-        /// let client = TelegramClient::new("123:ABC", MockTransport::new());
+        /// let client = TelegramClient::try_new("123:ABC", MockTransport::new()).unwrap();
         /// let chat = client.get_chat(&GetChat::new(-1001)).await?;
         /// assert_eq!(chat.label(), "0");
         /// # Ok(()) }
@@ -1035,7 +1072,7 @@ impl<T: Transport> TelegramClient<T> {
         ///     "status": "member",
         ///     "user": {"id": 42, "first_name": "Flo"},
         /// })));
-        /// let client = TelegramClient::new("123:ABC", transport);
+        /// let client = TelegramClient::try_new("123:ABC", transport).unwrap();
         /// let member = client.get_chat_member(&GetChatMember::new(-1001, 42)).await?;
         /// assert!(member.is_present());
         /// # Ok(()) }
@@ -1050,7 +1087,7 @@ impl<T: Transport> TelegramClient<T> {
         /// use telegram_api_client::{BanChatMember, MockTransport, TelegramClient};
         ///
         /// # async fn demo() -> telegram_api_client::Result<()> {
-        /// let client = TelegramClient::new("123:ABC", MockTransport::new());
+        /// let client = TelegramClient::try_new("123:ABC", MockTransport::new()).unwrap();
         /// client.ban_chat_member(&BanChatMember::new(-1001, 42)).await?;
         /// # Ok(()) }
         /// ```
@@ -1064,7 +1101,7 @@ impl<T: Transport> TelegramClient<T> {
         /// use telegram_api_client::{MockTransport, PinChatMessage, TelegramClient};
         ///
         /// # async fn demo() -> telegram_api_client::Result<()> {
-        /// let client = TelegramClient::new("123:ABC", MockTransport::new());
+        /// let client = TelegramClient::try_new("123:ABC", MockTransport::new()).unwrap();
         /// client.pin_chat_message(&PinChatMessage::new(-1001, 7)).await?;
         /// # Ok(()) }
         /// ```
@@ -1078,7 +1115,7 @@ impl<T: Transport> TelegramClient<T> {
         /// use telegram_api_client::{MockTransport, TelegramClient, UnpinChatMessage};
         ///
         /// # async fn demo() -> telegram_api_client::Result<()> {
-        /// let client = TelegramClient::new("123:ABC", MockTransport::new());
+        /// let client = TelegramClient::try_new("123:ABC", MockTransport::new()).unwrap();
         /// client.unpin_chat_message(&UnpinChatMessage::new(-1001)).await?;
         /// # Ok(()) }
         /// ```
@@ -1094,7 +1131,7 @@ impl<T: Transport> TelegramClient<T> {
         /// use telegram_api_client::{MockTransport, SetWebhook, TelegramClient};
         ///
         /// # async fn demo() -> telegram_api_client::Result<()> {
-        /// let client = TelegramClient::new("123:ABC", MockTransport::new());
+        /// let client = TelegramClient::try_new("123:ABC", MockTransport::new()).unwrap();
         /// let request = SetWebhook::new("https://example.com/hook").with_secret("s3cret");
         /// client.set_webhook(&request).await?;
         /// # Ok(()) }
@@ -1109,7 +1146,7 @@ impl<T: Transport> TelegramClient<T> {
         /// use telegram_api_client::{DeleteWebhook, MockTransport, TelegramClient};
         ///
         /// # async fn demo() -> telegram_api_client::Result<()> {
-        /// let client = TelegramClient::new("123:ABC", MockTransport::new());
+        /// let client = TelegramClient::try_new("123:ABC", MockTransport::new()).unwrap();
         /// client.delete_webhook(&DeleteWebhook::dropping_pending()).await?;
         /// # Ok(()) }
         /// ```
@@ -1126,7 +1163,7 @@ impl<T: Transport> TelegramClient<T> {
     /// use telegram_api_client::{MockTransport, TelegramClient};
     ///
     /// # async fn demo() -> telegram_api_client::Result<()> {
-    /// let client = TelegramClient::new("123:ABC", MockTransport::new());
+    /// let client = TelegramClient::try_new("123:ABC", MockTransport::new()).unwrap();
     /// let info = client.get_webhook_info().await?;
     /// assert!(!info.is_registered());
     /// # Ok(()) }
@@ -1146,7 +1183,7 @@ impl<T: Transport> TelegramClient<T> {
         /// use telegram_api_client::{GetUpdates, MockTransport, TelegramClient};
         ///
         /// # async fn demo() -> telegram_api_client::Result<()> {
-        /// let client = TelegramClient::new("123:ABC", MockTransport::new());
+        /// let client = TelegramClient::try_new("123:ABC", MockTransport::new()).unwrap();
         /// let updates = client.get_updates(&GetUpdates::new().timeout(25)).await?;
         /// assert!(updates.is_empty());
         /// # Ok(()) }
@@ -1163,7 +1200,7 @@ impl<T: Transport> TelegramClient<T> {
         /// use telegram_api_client::{file::File, GetFile, MockTransport, TelegramClient};
         ///
         /// # async fn demo() -> telegram_api_client::Result<()> {
-        /// let client = TelegramClient::new("123:ABC", MockTransport::new());
+        /// let client = TelegramClient::try_new("123:ABC", MockTransport::new()).unwrap();
         /// let file: File = client.get_file(&GetFile::new("AgACAgI")).await?;
         /// assert!(!file.is_downloadable());
         /// # Ok(()) }
@@ -1191,7 +1228,7 @@ impl<T: Transport> TelegramClient<T> {
     /// # async fn demo() -> telegram_api_client::Result<()> {
     /// let transport = MockTransport::new();
     /// transport.push(MockReply::result(serde_json::json!({"id": 7, "is_bot": true})));
-    /// let client = TelegramClient::new("123:ABC", transport.clone());
+    /// let client = TelegramClient::try_new("123:ABC", transport.clone()).unwrap();
     ///
     /// // The whole envelope, exactly as in 0.1 ...
     /// # #[allow(deprecated)]
@@ -1223,7 +1260,7 @@ impl<T: Transport> TelegramClient<T> {
     /// use telegram_api_client::{MockTransport, TelegramClient};
     ///
     /// # async fn demo() -> telegram_api_client::Result<()> {
-    /// let client = TelegramClient::new("123:ABC", MockTransport::new());
+    /// let client = TelegramClient::try_new("123:ABC", MockTransport::new()).unwrap();
     /// let me: telegram_api_client::User = client.me().await?;
     /// assert_eq!(me.id, 0);
     /// # Ok(()) }

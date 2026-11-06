@@ -22,7 +22,9 @@ fn client() -> (TelegramClient<MockTransport>, MockTransport) {
     let transport = MockTransport::new();
     transport.push(MockReply::result(message()));
     (
-        TelegramClient::new(TOKEN, transport.clone()).with_base_url("https://tg.test"),
+        TelegramClient::try_new(TOKEN, transport.clone())
+            .unwrap()
+            .with_base_url("https://tg.test"),
         transport,
     )
 }
@@ -156,7 +158,9 @@ async fn a_file_on_disk_is_read_and_named() {
 async fn a_media_group_attaches_every_upload_in_order() {
     let transport = MockTransport::new();
     transport.push(MockReply::result(json!([message(), message()])));
-    let client = TelegramClient::new(TOKEN, transport.clone()).with_base_url("https://tg.test");
+    let client = TelegramClient::try_new(TOKEN, transport.clone())
+        .unwrap()
+        .with_base_url("https://tg.test");
 
     let album = SendMediaGroup::new(
         CHAT,

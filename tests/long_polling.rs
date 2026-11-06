@@ -15,7 +15,9 @@ fn client(
     let transport = MockTransport::new();
     transport.extend(replies);
     (
-        TelegramClient::new("123:ABC", transport.clone()).without_retry(),
+        TelegramClient::try_new("123:ABC", transport.clone())
+            .unwrap()
+            .without_retry(),
         transport,
     )
 }

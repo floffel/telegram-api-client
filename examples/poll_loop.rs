@@ -76,7 +76,7 @@ async fn main() -> Result<()> {
     let stop = AtomicBool::new(false);
 
     if let Ok(token) = env::var("TELEGRAM_BOT_TOKEN") {
-        let client = TelegramClient::new(token, ReqwestTransport::new());
+        let client = TelegramClient::try_new(token, ReqwestTransport::new()).unwrap();
         let mut cursor = UpdateCursor::new();
         println!("polling the Bot API until interrupted");
         let total = run(&client, &mut cursor, &stop).await?;
@@ -94,7 +94,7 @@ async fn main() -> Result<()> {
     transport.push(MockReply::result(json!([
         {"update_id": 9, "message": {"message_id": 3, "chat": {"id": -1}, "text": "after the stop"}}
     ])));
-    let client = TelegramClient::new("123:ABC", transport.clone());
+    let client = TelegramClient::try_new("123:ABC", transport.clone()).unwrap();
 
     let mut cursor = UpdateCursor::new();
     poll_once(&client, &mut cursor, &stop, "before stop").await?;

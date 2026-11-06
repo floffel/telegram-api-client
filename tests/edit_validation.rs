@@ -110,7 +110,9 @@ fn copy_reply_target_must_be_positive_when_present() {
 #[tokio::test]
 async fn invalid_entities_and_reply_ids_stop_before_the_transport() {
     let transport = MockTransport::new();
-    let client = TelegramClient::new("123:ABC", transport.clone()).without_retry();
+    let client = TelegramClient::try_new("123:ABC", transport.clone())
+        .unwrap()
+        .without_retry();
 
     let edit = EditMessageText::new(CHAT, 7, "x").with_entities(vec![MessageEntity::bold(0, 2)]);
     let error = client.edit_message_text(&edit).await.unwrap_err();
