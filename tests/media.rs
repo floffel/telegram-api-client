@@ -358,21 +358,17 @@ fn unknown_field_before_known_member_is_kept() {
 
 #[test]
 fn constructors_round_trip_every_member() {
-    let photo = PhotoSize {
-        file_id: "A".into(),
-        file_unique_id: "u".into(),
-        width: 1,
-        height: 1,
-        ..PhotoSize::default()
-    };
-    let video = Video {
-        file_id: "V".into(),
-        file_unique_id: "v".into(),
-        width: 1,
-        height: 1,
-        duration: 1,
-        ..Video::default()
-    };
+    let mut photo = PhotoSize::default();
+    photo.file_id = "A".into();
+    photo.file_unique_id = "u".into();
+    photo.width = 1;
+    photo.height = 1;
+    let mut video = Video::default();
+    video.file_id = "V".into();
+    video.file_unique_id = "v".into();
+    video.width = 1;
+    video.height = 1;
+    video.duration = 1;
     let cases = vec![
         (
             PollMedia::animation(Animation::default()),
@@ -384,8 +380,10 @@ fn constructors_round_trip_every_member() {
             PollMediaKind::Document,
         ),
         (
-            PollMedia::link(Link {
-                url: "https://example.com".into(),
+            PollMedia::link({
+                let mut link = Link::default();
+                link.url = "https://example.com".into();
+                link
             }),
             PollMediaKind::Link,
         ),
@@ -811,16 +809,13 @@ fn a_negative_poll_option_member_is_a_payload_error_that_names_the_member() {
 
 #[test]
 fn unsigned_bounds_survive_a_round_trip() {
-    let video = Video {
-        file_id: "A".into(),
-        file_unique_id: "u".into(),
-        width: u32::MAX,
-        height: 0,
-        duration: u64::MAX,
-        start_timestamp: Some(0),
-        file_size: Some(u64::MAX),
-        ..Video::default()
-    };
+    let mut video = Video::default();
+    video.file_id = "A".into();
+    video.file_unique_id = "u".into();
+    video.width = u32::MAX;
+    video.duration = u64::MAX;
+    video.start_timestamp = Some(0);
+    video.file_size = Some(u64::MAX);
     let json = serde_json::to_string(&video).expect("the bounds serialize");
     assert!(!json.contains('-'));
     let back: Video = serde_json::from_str(&json).expect("the bounds parse back");
@@ -841,12 +836,7 @@ fn mask_points_round_trip_known_and_unknown_values() {
         ("future", MaskPoint::Unknown("future".into())),
     ] {
         assert_eq!(point.as_str(), wire);
-        let position = MaskPosition {
-            point: point.clone(),
-            x_shift: -0.25,
-            y_shift: 0.5,
-            scale: 2.0,
-        };
+        let position = MaskPosition::new(point.clone(), -0.25, 0.5, 2.0);
         let encoded = serde_json::to_value(&position).expect("valid position serializes");
         assert_eq!(encoded["point"], wire);
         let decoded: MaskPosition =
@@ -857,12 +847,7 @@ fn mask_points_round_trip_known_and_unknown_values() {
 
 #[test]
 fn mask_position_rejects_invalid_floats_before_serializing() {
-    let valid = MaskPosition {
-        point: MaskPoint::Eyes,
-        x_shift: 0.0,
-        y_shift: 0.0,
-        scale: 1.0,
-    };
+    let valid = MaskPosition::new(MaskPoint::Eyes, 0.0, 0.0, 1.0);
     assert!(valid.validate().is_ok());
     assert!(serde_json::to_value(&valid).is_ok());
 
@@ -895,12 +880,7 @@ fn mask_position_rejects_empty_points_and_non_positive_scales() {
         MaskPoint::Unknown(String::new()),
         MaskPoint::Unknown(" ".into()),
     ] {
-        let position = MaskPosition {
-            point,
-            x_shift: 0.0,
-            y_shift: 0.0,
-            scale: 1.0,
-        };
+        let position = MaskPosition::new(point, 0.0, 0.0, 1.0);
         if position.point.as_str().is_empty() {
             assert!(position.validate().is_err());
         } else {
@@ -912,12 +892,7 @@ fn mask_position_rejects_empty_points_and_non_positive_scales() {
     }
 
     for scale in [0.0, -1.0] {
-        let position = MaskPosition {
-            point: MaskPoint::Eyes,
-            x_shift: 0.0,
-            y_shift: 0.0,
-            scale,
-        };
+        let position = MaskPosition::new(MaskPoint::Eyes, 0.0, 0.0, scale);
         assert!(position.validate().is_err());
     }
 }
@@ -938,18 +913,11 @@ fn mask_position_decoding_refuses_invalid_values() {
 
 #[test]
 fn mask_position_equality_is_reflexive_for_nan() {
-    let nan = MaskPosition {
-        point: MaskPoint::Eyes,
-        x_shift: f64::NAN,
-        y_shift: 0.0,
-        scale: 1.0,
-    };
+    let nan = MaskPosition::new(MaskPoint::Eyes, f64::NAN, 0.0, 1.0);
     assert_eq!(nan, nan, "bitwise comparison keeps Eq sound for NaN");
 
-    let shifted = MaskPosition {
-        x_shift: 0.0,
-        ..nan.clone()
-    };
+    let mut shifted = nan.clone();
+    shifted.x_shift = 0.0;
     assert_ne!(nan, shifted, "a zero shift is not NaN");
 }
 
@@ -1047,12 +1015,7 @@ proptest! {
         y in -1000.0f64..1000.0,
         scale in 0.001f64..1000.0
     ) {
-        let position = MaskPosition {
-            point: MaskPoint::Chin,
-            x_shift: x,
-            y_shift: y,
-            scale,
-        };
+        let position = MaskPosition::new(MaskPoint::Chin, x, y, scale);
         let encoded = serde_json::to_string(&position)?;
         let decoded: MaskPosition = serde_json::from_str(&encoded)?;
         prop_assert_eq!(decoded.point, position.point);

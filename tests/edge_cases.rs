@@ -416,10 +416,9 @@ fn restricted_non_members_are_not_present() {
         let status = ChatMemberStatus::from(status);
         match status {
             ChatMemberStatus::Restricted => {
-                ChatMember::Restricted(telegram_api_client::ChatMemberRestricted {
-                    is_member,
-                    ..telegram_api_client::ChatMemberRestricted::default()
-                })
+                let mut restricted = telegram_api_client::ChatMemberRestricted::default();
+                restricted.is_member = is_member;
+                ChatMember::Restricted(restricted)
             }
             status => ChatMember::new(status, telegram_api_client::User::default()),
         }
@@ -679,11 +678,9 @@ fn chat_member_maps_every_status_to_its_shape() {
 fn chat_member_new_covers_every_status() {
     use telegram_api_client::{ChatMember, ChatMemberStatus, User};
 
-    let user = User {
-        id: 7,
-        first_name: "Flo".to_string(),
-        ..User::default()
-    };
+    let mut user = User::default();
+    user.id = 7;
+    user.first_name = "Flo".to_string();
     for status in [
         ChatMemberStatus::Creator,
         ChatMemberStatus::Administrator,
@@ -1734,14 +1731,7 @@ fn entities_and_link_previews_round_trip() {
 
 #[test]
 fn update_cursor_never_reprocesses_an_id() {
-    let batch = |ids: &[i64]| -> Vec<Update> {
-        ids.iter()
-            .map(|id| Update {
-                update_id: *id,
-                ..Update::default()
-            })
-            .collect()
-    };
+    let batch = |ids: &[i64]| -> Vec<Update> { ids.iter().map(|id| Update::new(*id)).collect() };
     let mut cursor = UpdateCursor::new();
     assert_eq!(cursor.next_offset(), None);
 
@@ -1765,10 +1755,7 @@ fn update_cursor_never_reprocesses_an_id() {
 #[test]
 fn update_cursor_saturates_at_i64_max() {
     let mut cursor = UpdateCursor::after(i64::MAX);
-    let update = Update {
-        update_id: i64::MAX,
-        ..Update::default()
-    };
+    let update = Update::new(i64::MAX);
     assert_eq!(cursor.confirm(&[update]), Vec::new());
     assert_eq!(cursor.next_offset(), Some(i64::MAX));
 }

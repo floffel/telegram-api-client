@@ -30,6 +30,7 @@ use crate::types::{ChatType, UpdateKind};
 /// assert_eq!(update.message.unwrap().chat.chat_type, ChatType::Supergroup);
 /// ```
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Update {
     /// Monotonic update id.
     #[serde(default, alias = "updateId")]
@@ -200,6 +201,7 @@ pub struct Update {
 
 /// A chat message.
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Message {
     /// Message id inside the chat.
     #[serde(default, alias = "messageId")]
@@ -230,6 +232,7 @@ pub struct Message {
 
 /// A user or bot.
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct User {
     /// Telegram user id.
     #[serde(default)]
@@ -254,7 +257,9 @@ impl User {
     /// ```
     /// use telegram_api_client::User;
     ///
-    /// let user = User { id: 7, first_name: "Flo".into(), ..User::default() };
+    /// let mut user = User::default();
+    /// user.id = 7;
+    /// user.first_name = "Flo".into();
     /// assert_eq!(user.display_name(), "Flo");
     /// assert_eq!(User::default().display_name(), "0");
     /// ```
@@ -274,6 +279,7 @@ impl User {
 
 /// The chat a message belongs to.
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Chat {
     /// Chat id — negative for groups.
     #[serde(default)]
@@ -301,7 +307,9 @@ impl Chat {
     /// ```
     /// use telegram_api_client::Chat;
     ///
-    /// let chat = Chat { id: -1, title: Some("Team".into()), ..Chat::default() };
+    /// let mut chat = Chat::default();
+    /// chat.id = -1;
+    /// chat.title = Some("Team".into());
     /// assert_eq!(chat.label(), "Team");
     /// ```
     #[must_use]
@@ -334,6 +342,7 @@ impl Chat {
 /// assert_eq!(query.data.as_deref(), Some("vote:yes"));
 /// ```
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct CallbackQuery {
     /// Id to pass to `answerCallbackQuery`.
     #[serde(default, alias = "callbackQueryId")]
@@ -369,7 +378,8 @@ impl CallbackQuery {
     /// ```
     /// use telegram_api_client::CallbackQuery;
     ///
-    /// let query = CallbackQuery { data: Some("go".into()), ..CallbackQuery::default() };
+    /// let mut query = CallbackQuery::default();
+    /// query.data = Some("go".into());
     /// assert_eq!(query.payload(), Some("go"));
     /// ```
     #[must_use]
@@ -389,6 +399,7 @@ impl CallbackQuery {
 /// assert_eq!(query.query, "ping");
 /// ```
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct InlineQuery {
     /// Id to pass to `answerInlineQuery`.
     #[serde(default)]
@@ -405,6 +416,26 @@ pub struct InlineQuery {
 }
 
 impl Update {
+    /// An otherwise empty update with `update_id`.
+    ///
+    /// Received payloads are `#[non_exhaustive]` so a new Bot API field does not
+    /// break downstream construction. Start from this constructor or
+    /// [`Default`](Self::default) and assign the fields you need.
+    ///
+    /// ```
+    /// use telegram_api_client::Update;
+    ///
+    /// let update = Update::new(42);
+    /// assert_eq!(update.update_id, 42);
+    /// ```
+    #[must_use]
+    pub fn new(update_id: i64) -> Self {
+        Self {
+            update_id,
+            ..Self::default()
+        }
+    }
+
     /// Returns the message text if this update is a text message.
     ///
     /// ```

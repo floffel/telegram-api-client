@@ -525,6 +525,9 @@ failing. Concretely, these are **patch-level** changes here:
 - new methods, new `with_*` builder setters, new types;
 - a new variant on a `#[non_exhaustive]` enum — the error enum and the payload
   enums that can grow are marked that way precisely so this stays patch-level;
+- a new field on a received-payload struct — `Update`, `Message`, event payloads,
+  media objects, chat-member shapes, `File` and `WebhookInfo` are
+  `#[non_exhaustive]` precisely so future Bot API fields stay patch-compatible;
 - documentation, dependency patch/minor updates, and stricter validation for
   input the Bot API would have rejected anyway.
 
@@ -532,6 +535,29 @@ failing. Concretely, these are **patch-level** changes here:
 public item, changing a method signature, adding a variant to an enum that is
 *not* `#[non_exhaustive]`, adding a required parameter to a request type, or
 turning a currently-ignored input into an error.
+
+Received-payload structs are populated by the crate's parser. When a caller
+needs to build one in a test or handler, start with `Type::default()` where the
+type has all-optional members, or use its constructor, and assign the fields it
+needs:
+
+```rust
+use telegram_api_client::{File, Update};
+
+let mut update = Update::new(42);
+update.message = Some(Box::default());
+assert_eq!(update.update_id, 42);
+
+let mut file = File::new("file-id", "unique-id");
+file.file_size = Some(1024);
+assert_eq!(file.file_size, Some(1024));
+```
+
+Downstream struct literals are intentionally unavailable for these types; using
+`..Default::default()` does not bypass `#[non_exhaustive]`. Request builders and
+other caller-constructed request types keep exhaustive literals. `MessageId` has
+no `Default` because a fabricated zero would mean a scheduled copy, and
+`PollMedia` exposes constructors instead of its private representation.
 
 Every release gets an entry in [CHANGELOG.md](CHANGELOG.md); the git tag carries
 no notes of its own, the changelog is the record.

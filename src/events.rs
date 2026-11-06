@@ -354,6 +354,7 @@ where
 /// assert_eq!(count.r#type.glyph(), Some("🔥"));
 /// ```
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ReactionCount {
     /// The reaction that was counted.
     #[serde(rename = "type", alias = "reactionType")]
@@ -377,6 +378,7 @@ pub struct ReactionCount {
 /// assert_eq!(update.new_reaction[0].glyph(), Some("👎"));
 /// ```
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct MessageReactionUpdated {
     /// Chat holding the message.
     #[serde(default)]
@@ -431,6 +433,7 @@ impl MessageReactionUpdated {
 /// assert_eq!(update.total(), 3);
 /// ```
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct MessageReactionCountUpdated {
     /// Chat holding the message.
     #[serde(default)]
@@ -470,11 +473,12 @@ impl MessageReactionCountUpdated {
     /// ```
     /// use telegram_api_client::{MessageReactionCountUpdated, ReactionCount};
     ///
+    /// let mut maximum = ReactionCount::default();
+    /// maximum.total_count = i64::MAX;
+    /// let mut one = ReactionCount::default();
+    /// one.total_count = 1;
     /// let mut update = MessageReactionCountUpdated::default();
-    /// update.reactions = vec![
-    ///     ReactionCount { total_count: i64::MAX, ..ReactionCount::default() },
-    ///     ReactionCount { total_count: 1, ..ReactionCount::default() },
-    /// ];
+    /// update.reactions = vec![maximum, one];
     /// assert_eq!(update.total(), i64::MAX);
     /// assert_eq!(update.checked_total(), None);
     /// ```
@@ -502,6 +506,7 @@ impl MessageReactionCountUpdated {
 // The wire object is a flat set of optional flags; nesting them would
 // misrepresent what Telegram sends.
 #[allow(clippy::struct_excessive_bools)]
+#[non_exhaustive]
 pub struct BusinessBotRights {
     /// Reply to messages.
     #[serde(default)]
@@ -560,6 +565,7 @@ pub struct BusinessBotRights {
 /// assert_eq!(connection.user_chat_id, 7);
 /// ```
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct BusinessConnection {
     /// Identifier to use as `business_connection_id`.
     #[serde(default)]
@@ -592,6 +598,7 @@ pub struct BusinessConnection {
 /// assert_eq!(deleted.message_ids, vec![3, 4]);
 /// ```
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct BusinessMessagesDeleted {
     /// Business connection the messages belonged to.
     #[serde(default, alias = "businessConnectionId")]
@@ -617,6 +624,7 @@ pub struct BusinessMessagesDeleted {
 /// assert_eq!(link.url(), "https://t.me/+abc");
 /// ```
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ChatInviteLink {
     /// The link itself.
     #[serde(default, alias = "inviteLink")]
@@ -698,6 +706,7 @@ impl ChatInviteLink {
 /// assert!(updated.joined());
 /// ```
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ChatMemberUpdated {
     /// Chat the membership belongs to.
     #[serde(default)]
@@ -770,6 +779,7 @@ impl ChatMemberUpdated {
 /// assert_eq!(request.user_chat_id, 3);
 /// ```
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ChatJoinRequest {
     /// Chat the request targets.
     #[serde(default)]
@@ -1000,6 +1010,7 @@ impl<'de> Deserialize<'de> for ChatBoostSource {
 /// assert_eq!(boost.source.source_kind(), "premium");
 /// ```
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ChatBoost {
     /// Identifier of the boost.
     #[serde(default, alias = "boostId")]
@@ -1027,6 +1038,7 @@ pub struct ChatBoost {
 /// assert_eq!(updated.boost.boost_id, "b1");
 /// ```
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ChatBoostUpdated {
     /// Chat that was boosted.
     #[serde(default)]
@@ -1048,6 +1060,7 @@ pub struct ChatBoostUpdated {
 /// assert_eq!(removed.remove_date, 5);
 /// ```
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ChatBoostRemoved {
     /// Chat that lost the boost.
     #[serde(default)]
@@ -1075,6 +1088,7 @@ pub struct ChatBoostRemoved {
 /// assert_eq!(address.city, "Dresden");
 /// ```
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ShippingAddress {
     /// ISO 3166-1 alpha-2 country code.
     #[serde(default, alias = "countryCode")]
@@ -1108,6 +1122,7 @@ pub struct ShippingAddress {
 /// assert_eq!(query.invoice_payload, "order-7");
 /// ```
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ShippingQuery {
     /// Query id, needed to answer it.
     #[serde(default)]
@@ -1132,6 +1147,7 @@ pub struct ShippingQuery {
 /// assert_eq!(order.email.as_deref(), Some("a@b.c"));
 /// ```
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct OrderInfo {
     /// Recipient name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1168,6 +1184,7 @@ pub struct OrderInfo {
 /// ```
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(from = "PreCheckoutQueryWire")]
+#[non_exhaustive]
 pub struct PreCheckoutQuery {
     /// Query id, needed to answer it.
     #[serde(default)]
@@ -1240,6 +1257,7 @@ impl From<PreCheckoutQueryWire> for PreCheckoutQuery {
 /// assert_eq!(purchased.paid_media_payload, "media-7");
 /// ```
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct PaidMediaPurchased {
     /// User who paid.
     #[serde(default)]
@@ -1258,6 +1276,7 @@ pub struct PaidMediaPurchased {
 /// assert!((location.latitude - 51.05).abs() < f64::EPSILON);
 /// ```
 #[derive(Debug, Clone, Copy, Default, Deserialize, Serialize)]
+#[non_exhaustive]
 pub struct Location {
     /// Latitude in degrees, required and within `-90.0..=90.0`.
     #[serde(deserialize_with = "deserialize_latitude")]
@@ -1326,6 +1345,7 @@ impl Eq for Location {}
 /// assert_eq!(result.query, "ping");
 /// ```
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ChosenInlineResult {
     /// Identifier of the chosen result.
     #[serde(default, alias = "resultId")]
@@ -1357,6 +1377,7 @@ pub struct ChosenInlineResult {
 /// assert_eq!(option.voter_count, 2);
 /// ```
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct PollOption {
     /// Persistent identifier of the option, stable across vote updates.
     #[serde(
@@ -1420,6 +1441,7 @@ pub struct PollOption {
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
 // Five independent flags, all part of the documented wire shape.
 #[allow(clippy::struct_excessive_bools)]
+#[non_exhaustive]
 pub struct Poll {
     /// Poll identifier.
     #[serde(default)]
@@ -1522,6 +1544,7 @@ pub struct Poll {
 /// assert!(answer.is_vote());
 /// ```
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct PollAnswer {
     /// Poll that was answered.
     #[serde(default, alias = "pollId")]
@@ -1567,6 +1590,7 @@ impl PollAnswer {
 /// assert_eq!(update.bot.as_ref().map(|bot| bot.first_name.as_str()), Some("Helper"));
 /// ```
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ManagedBotUpdated {
     /// User who created the bot.
     #[serde(default)]
@@ -1587,6 +1611,7 @@ pub struct ManagedBotUpdated {
 /// assert_eq!(update.state, "canceled");
 /// ```
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct BotSubscriptionUpdated {
     /// The subscriber.
     #[serde(default)]
@@ -1611,6 +1636,7 @@ pub struct BotSubscriptionUpdated {
 /// assert_eq!(stopped.draft_id, 9);
 /// ```
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct MessageGenerationStopped {
     /// Chat the message is being generated in.
     #[serde(default)]

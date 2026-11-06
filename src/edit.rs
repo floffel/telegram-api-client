@@ -874,6 +874,7 @@ pub enum EditResult {
 /// let _ = telegram_api_client::MessageId::default();
 /// ```
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct MessageId {
     /// Identifier of the created message, or `0` when the copy was scheduled.
     #[serde(deserialize_with = "deserialize_message_id")]

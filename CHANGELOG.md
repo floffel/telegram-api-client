@@ -36,6 +36,18 @@ means for this API is spelled out in the README under
 
 ### Changed
 
+- **Received-payload structs are `#[non_exhaustive]`** (#2). A Bot API field
+  added to an update, event payload, media object, chat-member shape, `File`,
+  `WebhookInfo` or `MessageId` would otherwise break downstream struct literals.
+  These types now keep adding a field patch-compatible; request types remain
+  exhaustive and continue to support struct literals. `Update::new`,
+  `File::new` and `MaskPosition::new` cover common construction, and every
+  received struct supports `Default` followed by field assignment. **Breaking**
+  for callers that built a received type with a struct literal: that syntax is
+  now refused at compile time, including with `..Default::default()`. Types with
+  all-optional members keep `Default`; `MessageId` remains decode-only because a
+  fabricated zero would mean a scheduled copy, and `PollMedia` keeps its
+  constructors over a private representation.
 - **`ChatMember` keeps the data its status carries** (#25). The type modelled
   only `status`, `user` and `is_anonymous`, so serde silently dropped everything
   else Telegram sends — the `can_*` rights, `is_member`, `until_date`,

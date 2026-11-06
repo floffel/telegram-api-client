@@ -279,6 +279,7 @@ where
 /// assert!(serde_json::from_str::<PhotoSize>(r#"{"width":4294967296}"#).is_err());
 /// ```
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct PhotoSize {
     /// Identifier usable to re-send the photo.
     #[serde(alias = "fileId")]
@@ -311,6 +312,7 @@ pub struct PhotoSize {
 /// assert_eq!(link.url, "https://example.com/x");
 /// ```
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Link {
     /// URL of the link.
     pub url: String,
@@ -339,6 +341,7 @@ pub struct Link {
 /// assert!(serde_json::from_str::<LivePhoto>(r#"{"duration":-1}"#).is_err());
 /// ```
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct LivePhoto {
     /// Photo part of the live photo.
     #[serde(
@@ -402,6 +405,7 @@ pub struct LivePhoto {
 /// assert!(serde_json::from_str::<Animation>(r#"{"file_size":-1}"#).is_err());
 /// ```
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Animation {
     /// Identifier usable to re-send the animation.
     #[serde(alias = "fileId")]
@@ -460,6 +464,7 @@ pub struct Animation {
 /// assert!(serde_json::from_str::<Audio>(r#"{"file_size":-1}"#).is_err());
 /// ```
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Audio {
     /// Identifier usable to re-send the audio.
     #[serde(alias = "fileId")]
@@ -519,6 +524,7 @@ pub struct Audio {
 /// assert!(serde_json::from_str::<Document>(r#"{"file_size":-1}"#).is_err());
 /// ```
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Document {
     /// Identifier usable to re-send the document.
     #[serde(alias = "fileId")]
@@ -556,6 +562,7 @@ pub struct Document {
 /// assert_eq!(venue.title, "PATO");
 /// ```
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Venue {
     /// Geographical location of the venue.
     pub location: Location,
@@ -620,6 +627,7 @@ pub struct Venue {
 /// assert!(serde_json::from_str::<VideoQuality>(r#"{"file_size":-1}"#).is_err());
 /// ```
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct VideoQuality {
     /// Identifier usable to re-send this quality.
     #[serde(alias = "fileId")]
@@ -672,6 +680,7 @@ pub struct VideoQuality {
 /// assert!(serde_json::from_str::<Video>(r#"{"start_timestamp":-1}"#).is_err());
 /// ```
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Video {
     /// Identifier usable to re-send the video.
     #[serde(alias = "fileId")]
@@ -796,6 +805,7 @@ impl<'de> Deserialize<'de> for MaskPoint {
 /// assert_eq!(position.point, MaskPoint::Eyes);
 /// ```
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct MaskPosition {
     /// The face part; future values are preserved as [`MaskPoint::Unknown`].
     pub point: MaskPoint,
@@ -807,7 +817,33 @@ pub struct MaskPosition {
     pub scale: f64,
 }
 
+impl Default for MaskPosition {
+    /// A valid, neutral position: eyes, no shift and unit scale.
+    fn default() -> Self {
+        Self {
+            point: MaskPoint::Eyes,
+            x_shift: 0.0,
+            y_shift: 0.0,
+            scale: 1.0,
+        }
+    }
+}
+
 impl MaskPosition {
+    /// A mask position with the supplied point and floating-point members.
+    ///
+    /// Call [`validate`](Self::validate) before sending when the values are not
+    /// already known to be finite and the scale is positive.
+    #[must_use]
+    pub fn new(point: MaskPoint, x_shift: f64, y_shift: f64, scale: f64) -> Self {
+        Self {
+            point,
+            x_shift,
+            y_shift,
+            scale,
+        }
+    }
+
     /// Checks the point and floating-point members before they reach the wire.
     ///
     /// # Errors
@@ -926,6 +962,7 @@ impl Eq for MaskPosition {}
 /// assert!(serde_json::from_str::<Sticker>(r#"{"file_size":-1}"#).is_err());
 /// ```
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Sticker {
     /// Identifier usable to re-send the sticker.
     #[serde(alias = "fileId")]
@@ -1009,6 +1046,7 @@ pub struct Sticker {
 /// assert_eq!(media.kind(), PollMediaKind::Link);
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct PollMedia {
     member: PollMediaMember,
     extra: Map<String, Value>,
