@@ -360,8 +360,10 @@ fn locations_compare_by_value_and_survive_nan() {
             "live_period":60,"heading":360,"proximity_alert_radius":100000}"#,
     )
     .expect("inclusive boundaries");
-    assert_eq!(corners.latitude, -90.0);
-    assert_eq!(corners.longitude, 180.0);
+    // Bit-exact: the wire corners must survive untouched, and clippy's
+    // float_cmp lint forbids the plain comparison.
+    assert_eq!(corners.latitude.to_bits(), (-90.0_f64).to_bits());
+    assert_eq!(corners.longitude.to_bits(), 180.0_f64.to_bits());
     assert_eq!(corners.horizontal_accuracy, Some(1500.0));
     assert_eq!(corners.live_period, Some(60));
     assert_eq!(corners.heading, Some(360));
