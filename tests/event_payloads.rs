@@ -48,6 +48,32 @@ fn reaction_count_sums_and_keeps_the_reaction() {
     let update: telegram_api_client::MessageReactionCountUpdated =
         serde_json::from_str(r#"{"message_id":1,"reactions":[]}"#).expect("empty reactions");
     assert_eq!(update.total(), 0, "no reactions sums to zero");
+    assert_eq!(update.checked_total(), Some(0));
+
+    assert!(
+        serde_json::from_str::<ReactionCount>(
+            r#"{"type":{"type":"emoji","emoji":"👍"},"total_count":-1}"#
+        )
+        .is_err(),
+        "negative counts are not valid"
+    );
+    assert!(
+        serde_json::from_str::<ReactionCount>(r#"{"type":{"type":"paid"}}"#).is_err(),
+        "total_count is required"
+    );
+
+    let maximum: ReactionCount = serde_json::from_str(
+        r#"{"type":{"type":"emoji","emoji":"👍"},"total_count":9223372036854775807}"#,
+    )
+    .expect("i64::MAX is a valid count");
+    assert_eq!(maximum.total_count, i64::MAX);
+
+    let overflowing = telegram_api_client::MessageReactionCountUpdated {
+        reactions: vec![maximum, counts[0].clone()],
+        ..telegram_api_client::MessageReactionCountUpdated::default()
+    };
+    assert_eq!(overflowing.checked_total(), None);
+    assert_eq!(overflowing.total(), i64::MAX, "display total saturates");
 }
 
 #[test]
@@ -62,6 +88,14 @@ fn removing_every_reaction_is_reported() {
         serde_json::from_str(r#"{"message_id":1,"new_reaction":[{"type":"emoji","emoji":"👎"}]}"#)
             .expect("parse");
     assert!(!changed.removed_all());
+
+    assert!(
+        serde_json::from_str::<telegram_api_client::MessageReactionUpdated>(
+            r#"{"message_id":1,"old_reaction":[]}"#
+        )
+        .is_err(),
+        "new_reaction is required"
+    );
 }
 
 #[test]
@@ -169,12 +203,12 @@ fn a_retracted_poll_vote_is_not_a_vote() {
 }
 
 #[test]
-fn business_rights_default_to_granted() {
+fn business_rights_default_to_denied() {
     use telegram_api_client::BusinessBotRights;
 
     let absent: BusinessBotRights = serde_json::from_str("{}").expect("empty rights");
-    assert!(absent.can_reply);
-    assert!(absent.can_manage_stories);
+    assert!(!absent.can_reply);
+    assert!(!absent.can_manage_stories);
     assert_eq!(absent, BusinessBotRights::default());
 
     let revoked: BusinessBotRights =
@@ -182,7 +216,12 @@ fn business_rights_default_to_granted() {
             .expect("partial rights");
     assert!(!revoked.can_reply);
     assert!(!revoked.can_delete_all_messages);
-    assert!(revoked.can_read_messages, "unmentioned rights stay granted");
+    assert!(!revoked.can_read_messages, "unmentioned rights are denied");
+
+    let one: BusinessBotRights =
+        serde_json::from_str(r#"{"can_transfer_stars":true}"#).expect("single-grant object");
+    assert!(one.can_transfer_stars);
+    assert!(!one.can_transfer_and_upgrade_gifts);
 }
 
 #[test]
@@ -230,6 +269,40 @@ fn locations_compare_by_value_and_survive_nan() {
         ..Location::default()
     };
     assert_ne!(a, slightly_off);
+
+    for invalid in [
+        r#"{"longitude":13.74}"#,
+        r#"{"latitude":51.05}"#,
+        r#"{"latitude":91.0,"longitude":0.0}"#,
+        r#"{"latitude":-90.1,"longitude":0.0}"#,
+        r#"{"latitude":0.0,"longitude":181.0}"#,
+        r#"{"latitude":0.0,"longitude":-180.1}"#,
+        r#"{"latitude":0.0,"longitude":0.0,"horizontal_accuracy":-1.0}"#,
+        r#"{"latitude":0.0,"longitude":0.0,"horizontal_accuracy":1500.1}"#,
+        r#"{"latitude":0.0,"longitude":0.0,"live_period":59}"#,
+        r#"{"latitude":0.0,"longitude":0.0,"live_period":86401}"#,
+        r#"{"latitude":0.0,"longitude":0.0,"heading":0}"#,
+        r#"{"latitude":0.0,"longitude":0.0,"heading":361}"#,
+        r#"{"latitude":0.0,"longitude":0.0,"proximity_alert_radius":0}"#,
+        r#"{"latitude":0.0,"longitude":0.0,"proximity_alert_radius":100001}"#,
+    ] {
+        assert!(
+            serde_json::from_str::<Location>(invalid).is_err(),
+            "accepted {invalid}"
+        );
+    }
+
+    let corners: Location = serde_json::from_str(
+        r#"{"latitude":-90.0,"longitude":180.0,"horizontal_accuracy":1500.0,
+            "live_period":60,"heading":360,"proximity_alert_radius":100000}"#,
+    )
+    .expect("inclusive boundaries");
+    assert_eq!(corners.latitude, -90.0);
+    assert_eq!(corners.longitude, 180.0);
+    assert_eq!(corners.horizontal_accuracy, Some(1500.0));
+    assert_eq!(corners.live_period, Some(60));
+    assert_eq!(corners.heading, Some(360));
+    assert_eq!(corners.proximity_alert_radius, Some(100_000));
 }
 
 #[test]
@@ -249,10 +322,39 @@ fn payment_payloads_keep_their_optional_parts() {
         Some("Dresden".to_string())
     );
 
-    let bare: telegram_api_client::PreCheckoutQuery =
-        serde_json::from_str(r#"{"id":"pc2","currency":"XTR","total_amount":1}"#).expect("bare");
+    let bare: telegram_api_client::PreCheckoutQuery = serde_json::from_str(
+        r#"{"id":"pc2","from":{"id":2},"currency":"XTR","total_amount":1,
+            "invoice_payload":"stars"}"#,
+    )
+    .expect("bare");
     assert_eq!(bare.shipping_option_id, None);
     assert_eq!(bare.order_info, None);
+    assert_eq!(bare.from.map(|from| from.id), Some(2));
+
+    let new_currency: telegram_api_client::PreCheckoutQuery = serde_json::from_str(
+        r#"{"id":"pc3","from":{"id":3},"currency":"XCG","total_amount":1,
+            "invoice_payload":"new-code"}"#,
+    )
+    .expect("current ISO code");
+    assert_eq!(new_currency.currency, "XCG");
+
+    for invalid in [
+        r#"{"from":{"id":1},"currency":"EUR","total_amount":1,"invoice_payload":"p"}"#,
+        r#"{"id":"pc","currency":"EUR","total_amount":1,"invoice_payload":"p"}"#,
+        r#"{"id":"pc","from":{"id":1},"total_amount":1,"invoice_payload":"p"}"#,
+        r#"{"id":"pc","from":{"id":1},"currency":"EUR","invoice_payload":"p"}"#,
+        r#"{"id":"pc","from":{"id":1},"currency":"EUR","total_amount":1}"#,
+        r#"{"id":"pc","from":{"id":1},"currency":"EUR","total_amount":0,"invoice_payload":"p"}"#,
+        r#"{"id":"pc","from":{"id":1},"currency":"EUR","total_amount":-5,"invoice_payload":"p"}"#,
+        r#"{"id":"pc","from":{"id":1},"currency":"eur","total_amount":1,"invoice_payload":"p"}"#,
+        r#"{"id":"pc","from":{"id":1},"currency":"ZZZ","total_amount":1,"invoice_payload":"p"}"#,
+        r#"{"id":"pc","from":{"id":1},"currency":"ANG","total_amount":1,"invoice_payload":"p"}"#,
+    ] {
+        assert!(
+            serde_json::from_str::<telegram_api_client::PreCheckoutQuery>(invalid).is_err(),
+            "accepted {invalid}"
+        );
+    }
 }
 
 #[test]

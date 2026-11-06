@@ -8,10 +8,10 @@ use telegram_api_client::{
     guess_mime, is_idempotent, is_valid_mime, send::MAX_POLL_OPTION, AnswerCallbackQuery,
     AnswerInlineQuery, ChatId, ChatMember, ChatMemberPresence, ChatMemberStatus, EditTarget,
     EntityKind, Error, File, GetFile, InlineQueryResult, InlineQueryResultsButton, InputMedia,
-    InputMediaKind, MenuButton, MessageEntity, MockTransport, MultipartFile, MultipartForm,
-    ParseMode, PollType, RetryPolicy, SendMessage, SendPoll, TelegramClient, Update, UpdateCursor,
-    MAX_CALLBACK_TEXT, MAX_DOWNLOAD_BYTES, MAX_FILE_ID_BYTES, MAX_INLINE_NEXT_OFFSET_BYTES,
-    MAX_INLINE_START_PARAMETER_BYTES,
+    InputMediaKind, MenuButton, MessageEntity, MessageReactionCountUpdated, MockTransport,
+    MultipartFile, MultipartForm, ParseMode, PollType, ReactionCount, RetryPolicy, SendMessage,
+    SendPoll, TelegramClient, Update, UpdateCursor, MAX_CALLBACK_TEXT, MAX_DOWNLOAD_BYTES,
+    MAX_FILE_ID_BYTES, MAX_INLINE_NEXT_OFFSET_BYTES, MAX_INLINE_START_PARAMETER_BYTES,
 };
 
 proptest! {
@@ -656,6 +656,30 @@ proptest! {
                 body
             );
         }
+    }
+
+    /// Parsed reaction counts are non-negative, and aggregation either returns
+    /// the exact checked sum or saturates at `i64::MAX` without panicking.
+    #[test]
+    fn reaction_totals_are_non_negative_and_do_not_overflow(
+        counts in prop::collection::vec(0_i64..=i64::MAX, 0..32),
+    ) {
+        let update = MessageReactionCountUpdated {
+            reactions: counts
+                .iter()
+                .map(|count| ReactionCount {
+                    total_count: *count,
+                    ..ReactionCount::default()
+                })
+                .collect(),
+            ..MessageReactionCountUpdated::default()
+        };
+        let expected = counts
+            .iter()
+            .try_fold(0_i64, |total, count| total.checked_add(*count));
+        prop_assert_eq!(update.checked_total(), expected);
+        prop_assert_eq!(update.total(), expected.unwrap_or(i64::MAX));
+        prop_assert!(update.total() >= 0);
     }
 }
 
